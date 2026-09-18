@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+{% set display_name = (profile.project_name or '未命名项目') ~ ' + ' ~ (profile.platform or '未指定平台') %}<title>{{ display_name }} · Chrome 管理器</title>
+<link rel="stylesheet" href="/static/app.css?v=20260912">
+<script src="/static/app.js?v=20260907" defer></script>
+</head>
+<body class="profile-page">{% set status_text = {'running': '运行中', 'stopped': '已停止', 'starting': '启动中', 'stopping': '停止中', 'failed': '启动失败'}.get(profile.status, profile.status) %}<main class="instances-view profile-info-view">
+<header class="profile-header">
+<p>🧩 配置详情</p>
+<h1>{{ display_name }}</h1>
+<span class="status status-{{ profile.status }}">{{ status_text }}</span>
+<label class="theme-picker profile-theme-picker">🎨 主题<select id="theme-mode"><option value="system">系统（自动）</option><option value="light">明亮 / 白天</option><option value="dark">暗黑 / 晚上</option></select></label>
+</header>
+<section class="profile-details">
+<article class="profile-description-card">
+<span>📝 配置说明</span>
+<p>{{ profile.description or '暂无描述' }}</p>
+</article>
+<section class="panel profile-table-panel">
+<table class="profile-info-table">
+<tbody>
+<tr>
+<th>项目</th>
+<td>{{ profile.project_name or '—' }}</td>
+</tr>
+<tr>
+<th>平台</th>
+<td>{{ profile.platform or '—' }}</td>
+</tr>
+<tr>
+<th>账号</th>
+<td>{{ profile.account_name or '—' }}</td>
+</tr>
+<tr>
+<th>CDP 端口</th>
+<td>
+<code>{{ profile.cdp_port or '—' }}</code>
+</td>
+</tr>
+<tr>
+<th>默认打开网址</th>
+<td>{{ profile.default_url or '—' }}</td>
+</tr>
+<tr>
+<th>代理地址</th>
+<td>{{ profile.proxy_url or '直连' }}</td>
+</tr>
+<tr>
+<th>当前出口 IP</th>
+<td id="exit-ip">正在检测…</td>
+</tr>
+<tr>
+<th>用户数据目录</th>
+<td>
+<code>{{ profile.user_data_dir }}</code>
+</td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+</main>
+<script>fetch('https://api.ipify.org?format=json').then(r=>r.ok?r.json():Promise.reject()).then(d=>document.getElementById('exit-ip').textContent=d.ip).catch(()=>document.getElementById('exit-ip').textContent='获取失败');</script>
+</body>
+</html>

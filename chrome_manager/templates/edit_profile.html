@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+{% set display_name = (profile.project_name or '未命名项目') ~ ' + ' ~ (profile.platform or '未指定平台') %}<title>编辑 {{ display_name }} · Chrome 管理器</title>
+<link rel="stylesheet" href="/static/app.css?v=20260917">
+<script src="/static/app.js?v=20260907" defer></script>
+</head>
+<body>
+<div class="app-shell">
+<aside class="sidebar">
+<div class="brand">
+<span class="brand-mark">CM</span>
+<span>Chrome<br>管理器</span>
+</div>
+<nav>
+<a href="/dashboard" class="nav-item">🏠 控制台</a>
+<a href="/" class="nav-item active">🧩 实例</a>
+</nav>
+<label class="theme-picker sidebar-theme">🎨 主题<select id="theme-mode"><option value="system">系统（自动）</option><option value="light">明亮 / 白天</option><option value="dark">暗黑 / 晚上</option></select></label>
+</aside>
+<main class="instances-view edit-view">
+<a class="back" href="/">← 返回实例</a>
+<header class="edit-header">
+<p class="view-kicker">实例设置</p>
+<h1>编辑 {{ display_name }}</h1>
+<p>仅停止状态可以编辑。CDP 端口与用户数据目录保持不变，网址和代理会在下次启动时生效。</p>
+</header>
+<section class="new-profile-panel">
+<form action="/profiles/{{ profile.name }}/edit" method="post" class="form">
+<label>项目<input name="project_name" value="{{ profile.project_name or '' }}">
+</label>
+<label>平台<input name="platform" value="{{ profile.platform or '' }}">
+</label>
+<label>账号（可选）<input name="account_name" value="{{ profile.account_name or '' }}">
+</label>
+<label>默认打开网址（可多个）<input name="default_url" type="text" value="{{ profile.default_url or '' }}" placeholder="https://example.com, https://example.org">
+</label>
+<label class="wide">代理地址（可选）<input name="proxy_url" value="{{ profile.proxy_url or '' }}" placeholder="http://127.0.0.1:7890">
+</label>{% if detected_proxy %}<label class="wide checkbox">
+<input name="use_detected_proxy" type="checkbox" value="true"> 使用检测到的本机环境代理：{{ detected_proxy }}</label>{% endif %}<label class="wide">描述<textarea name="description">{{ profile.description or '' }}</textarea>
+</label>
+<button type="submit" class="create-submit">保存修改</button>
+</form>
+</section>
+</main>
+</div>
+</body>
+</html>

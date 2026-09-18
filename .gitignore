@@ -1,0 +1,48 @@
+# Python bytecode and test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Python packaging and virtual environments
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Local IDE and operating-system files
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local environment variables and machine-specific overrides
+.env
+.env.*
+!.env.example
+*.local.toml
+*.local.json
+
+# Chrome Manager runtime data: profiles, databases, logs and local smoke tests
+.phase1-smoke/
+data/
+profiles/
+logs/
+backups/
+config/settings.toml
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.log

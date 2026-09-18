@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chrome-manager"
+version = "0.1.0"
+description = "Windows CLI for isolated Chrome profiles and CDP endpoints"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.16,<1.0",
+    "rich>=13,<14",
+    "fastapi>=0.141,<1.0",
+    "uvicorn>=0.30,<1.0",
+    "jinja2>=3.1,<4.0",
+    "python-multipart>=0.0.20,<1.0",
+    "psutil>=6.0,<8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+]
+
+[project.scripts]
+chrome-manager = "chrome_manager.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["chrome_manager*"]

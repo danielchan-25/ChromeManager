@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>控制台 · Chrome 管理器</title>
+<link rel="stylesheet" href="/static/app.css?v=20260917">
+<script src="/static/app.js?v=20260916" defer>
+</script>
+</head>
+<body>
+<div class="app-shell">
+<aside class="sidebar">
+<div class="brand">
+<span class="brand-mark">CM</span>
+<span>Chrome<br>管理器</span>
+</div>
+<nav>
+<a href="/dashboard" class="nav-item active">🏠 控制台</a>
+<a href="/" class="nav-item">🧩 实例</a>
+</nav>
+<label class="theme-picker sidebar-theme">🎨 主题<select id="theme-mode"><option value="system">系统（自动）</option><option value="light">明亮 / 白天</option><option value="dark">暗黑 / 晚上</option></select></label>
+</aside>
+<main class="instances-view dashboard-view">
+<header class="page-header">
+<div>
+<h1>控制台</h1>
+</div>
+</header>
+<section class="summary-grid">
+<article class="summary-card">
+<span>实例总数</span>
+<strong>{{ profiles|length }}</strong>
+</article>
+<article class="summary-card">
+<span>运行中</span>
+<strong class="success-text">{{ running_count }}</strong>
+</article>
+<article class="summary-card">
+<span>已停止</span>
+<strong>{{ stopped_count }}</strong>
+</article>
+</section>
+<section class="resource-section">
+<div class="section-heading">
+<h2>🖥️ 本机资源</h2>
+<span id="resource-updated">每 10 秒自动刷新</span>
+</div>
+<div class="resource-dashboard-grid">
+<div class="resource-grid">
+<article class="resource-card"><span>CPU 使用率</span><strong id="system-cpu">{{ system_resources.cpu }}%</strong><div class="resource-meter"><i id="system-cpu-meter" style="width: {{ system_resources.cpu }}%"></i></div></article>
+<article class="resource-card"><span>内存使用率</span><strong id="system-memory">{{ system_resources.memory_percent }}%</strong><small id="system-memory-detail">{{ system_resources.memory_used }} / {{ system_resources.memory_total }} GB</small><div class="resource-meter"><i id="system-memory-meter" style="width: {{ system_resources.memory_percent }}%"></i></div></article>
+</div>
+<article class="resource-chart-card"><h3>CPU 曲线</h3><canvas id="cpu-resource-chart" aria-label="各实例 CPU 使用率曲线"></canvas><div id="cpu-chart-legend" class="chart-legend"></div></article>
+<article class="resource-chart-card"><h3>内存曲线</h3><canvas id="memory-resource-chart" aria-label="各实例内存占用曲线"></canvas><div id="memory-chart-legend" class="chart-legend"></div></article>
+</div>
+</section>
+<section class="dashboard-section">
+<div class="section-heading">
+<h2>实例资源占用</h2>
+<a href="/">查看全部 →</a>
+</div>
+<div class="dashboard-list">{% for profile in profiles %}{% set status_text = {'running': '运行中', 'stopped': '已停止', 'starting': '启动中', 'stopping': '停止中', 'failed': '启动失败'}.get(profile.status, profile.status) %}<article data-profile-id="{{ profile.id }}">
+<div>
+<strong>{{ (profile.project_name or '未命名项目') ~ ' + ' ~ (profile.platform or '未指定平台') }}</strong>
+<span class="instance-usage">端口 {{ profile.cdp_port or '—' }}{% if instance_resources.get(profile.id) %} · CPU {{ instance_resources[profile.id].cpu }}% · 内存 {{ instance_resources[profile.id].memory }} MB{% endif %}</span>
+</div>
+<span class="status status-{{ profile.status }}">{{ status_text }}</span>
+</article>{% else %}<p class="muted">还没有可管理的实例。</p>{% endfor %}</div>
+</section>
+</main>
+</div>
+<script id="resource-history-data" type="application/json">{{ resource_history | tojson }}</script>
+</body>
+</html>
