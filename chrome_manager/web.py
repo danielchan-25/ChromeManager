@@ -25,9 +25,19 @@ PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
 
-def error_redirect(message: str) -> RedirectResponse:
+def home_redirect(selected: str = "", error: str = "") -> RedirectResponse:
+    """Return to the console while retaining the instance the user was operating."""
+    query = []
+    if selected:
+        query.append(f"selected={quote(selected)}")
+    if error:
+        query.append(f"error={quote(error)}")
+    return RedirectResponse(url=f"/?{'&'.join(query)}" if query else "/", status_code=303)
+
+
+def error_redirect(message: str, selected: str = "") -> RedirectResponse:
     """Return user-facing validation failures without exposing a server error page."""
-    return RedirectResponse(url=f"/?error={quote(message)}", status_code=303)
+    return home_redirect(selected, message)
 
 
 def detected_local_proxy() -> str | None:
@@ -52,6 +62,19 @@ def sort_profiles(profile_list: list[object], sort_by: str) -> list[object]:
 
 def display_profile_name(profile: object) -> str:
     return f"{profile.project_name or '未命名项目'} + {profile.platform or '未指定平台'}"
+
+
+def runtime_details(database: Database) -> dict[int, dict[str, object]]:
+    """Return the current managed process details used by the local console."""
+    with database.read() as connection:
+        rows = connection.execute(
+            "SELECT profile_id, pid, started_at FROM runtime_sessions "
+            "WHERE stopped_at IS NULL ORDER BY id DESC"
+        ).fetchall()
+    return {
+        int(row["profile_id"]): {"pid": row["pid"], "started_at": row["started_at"]}
+        for row in rows
+    }
 
 
 def resource_snapshot(database: Database) -> tuple[dict[str, float], dict[int, dict[str, float]]]:
@@ -159,26 +182,9 @@ def create_app() -> FastAPI:
         resources.stop()
 
     @app.get("/dashboard", response_class=HTMLResponse)
-    def dashboard(request: Request) -> HTMLResponse:
-        profile_list = profiles.list()
-        if not resources.samples():
-            resources.sample()
-        resource_history = resources.samples()
-        latest_resources = resource_history[-1]
-        system_resources = latest_resources["system"]
-        instance_resources = {int(profile_id): value for profile_id, value in latest_resources["instances"].items()}
-        return templates.TemplateResponse(
-            request,
-            "dashboard.html",
-            {
-                "profiles": profile_list,
-                "running_count": sum(profile.status == "running" for profile in profile_list),
-                "stopped_count": sum(profile.status == "stopped" for profile in profile_list),
-                "system_resources": system_resources,
-                "instance_resources": instance_resources,
-                "resource_history": resource_history,
-            },
-        )
+    def dashboard() -> RedirectResponse:
+        """The desktop console combines the former dashboard and instance views."""
+        return RedirectResponse(url="/", status_code=303)
 
     @app.get("/api/resources")
     def resource_history() -> dict[str, object]:
@@ -191,19 +197,45 @@ def create_app() -> FastAPI:
         sort_by = request.query_params.get("sort", "port")
         if sort_by not in {"port", "project", "platform", "status"}:
             sort_by = "port"
+        profile_list = sort_profiles(profiles.list(), sort_by)
+        if not resources.samples():
+            resources.sample()
+        resource_history = resources.samples()
+        latest_resources = resource_history[-1]
+        active_runtime = runtime_details(database)
+        desktop_profiles = [
+            {
+                "id": profile.id,
+                "name": profile.name,
+                "display_name": display_profile_name(profile),
+                "status": profile.status,
+                "port": profile.cdp_port,
+                "description": profile.description or "暂无描述",
+                "proxy": profile.proxy_url or "直连",
+                "cpu": latest_resources["instances"].get(str(profile.id), {}).get("cpu", 0),
+                "memory": latest_resources["instances"].get(str(profile.id), {}).get("memory", 0),
+                **active_runtime.get(profile.id, {"pid": None, "started_at": None}),
+            }
+            for profile in profile_list
+        ]
+        selected_name = request.query_params.get("selected", "")
+        selected_profile = next((profile for profile in desktop_profiles if profile["name"] == selected_name), None)
+        selected_profile_id = selected_profile["id"] if selected_profile else (desktop_profiles[0]["id"] if desktop_profiles else None)
         return templates.TemplateResponse(
             request,
             "index.html",
             {
-                "profiles": sort_profiles(profiles.list(), sort_by), "sort_by": sort_by, "suggested_port": profiles.suggested_port(),
-                "detected_proxy": detected_local_proxy(), "error": None,
+                "profiles": profile_list, "desktop_profiles": desktop_profiles, "sort_by": sort_by,
+                "suggested_port": profiles.suggested_port(), "detected_proxy": detected_local_proxy(),
+                "system_resources": latest_resources["system"], "resource_history": resource_history,
+                "selected_profile_id": selected_profile_id, "selected_profile": selected_profile, "error": None,
             },
         )
 
     @app.get("/profiles")
     def profiles_index() -> RedirectResponse:
         """Keep direct navigation to the profile collection on the management page."""
-        return RedirectResponse(url="/", status_code=303)
+        return home_redirect(profile.name)
 
     @app.post("/profiles")
     def create_profile(
@@ -239,55 +271,67 @@ def create_app() -> FastAPI:
         except ProfileError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return templates.TemplateResponse(
-            request, "edit_profile.html", {"profile": profile, "detected_proxy": detected_local_proxy()}
+            request, "edit_profile.html", {"profile": profile}
         )
 
     @app.post("/profiles/{name}/edit")
     def update_profile(
         name: str, project_name: str = Form(""), platform: str = Form(""), account_name: str = Form(""),
         description: str = Form(""), default_url: str = Form(""), proxy_url: str = Form(""),
-        use_detected_proxy: bool = Form(False),
+        proxy_enabled: bool = Form(False),
     ) -> RedirectResponse:
         try:
             profiles.update(
                 name, project_name=project_name or None, platform=platform or None, account_name=account_name or None,
                 description=description or None, default_url=default_url or None,
-                proxy_url=proxy_url or (detected_local_proxy() if use_detected_proxy else None),
+                proxy_url=proxy_url if proxy_enabled else None,
             )
         except ProfileError as exc:
-            return error_redirect(str(exc))
-        return RedirectResponse(url="/", status_code=303)
+            return error_redirect(str(exc), name)
+        return home_redirect(name)
 
     @app.post("/profiles/{name}/delete")
-    def delete_profile(name: str) -> RedirectResponse:
+    def delete_profile(name: str, selected: str = "") -> RedirectResponse:
         try:
             profiles.delete(name)
         except ProfileError as exc:
-            return error_redirect(str(exc))
-        return RedirectResponse(url="/", status_code=303)
+            return error_redirect(str(exc), selected or name)
+        return home_redirect(selected)
 
     @app.post("/profiles/{name}/stop")
-    def stop_profile(name: str) -> RedirectResponse:
+    def stop_profile(name: str, selected: str = "") -> RedirectResponse:
         try:
             processes.stop_profile(profiles.show(name))
         except (ProfileError, ProcessStopError) as exc:
-            return error_redirect(str(exc))
-        return RedirectResponse(url="/", status_code=303)
+            return error_redirect(str(exc), selected or name)
+        return home_redirect(selected or name)
 
     @app.post("/profiles/{name}/start")
-    def start_profile(name: str) -> RedirectResponse:
+    def start_profile(name: str, selected: str = "") -> RedirectResponse:
         try:
             chrome.start(profiles.show(name))
         except (ProfileError, ChromeStartError) as exc:
-            return error_redirect(str(exc))
-        return RedirectResponse(url="/", status_code=303)
+            return error_redirect(str(exc), selected or name)
+        return home_redirect(selected or name)
+
+    @app.post("/profiles/{name}/restart")
+    def restart_profile(name: str, selected: str = "") -> RedirectResponse:
+        try:
+            profile = profiles.show(name)
+            if profile.status == "running":
+                processes.stop_profile(profile)
+                profile = profiles.show(name)
+            chrome.start(profile)
+        except (ProfileError, ChromeStartError, ProcessStopError) as exc:
+            return error_redirect(str(exc), selected or name)
+        return home_redirect(selected or name)
 
     @app.post("/profiles/{name}/focus")
-    def focus_profile(name: str) -> RedirectResponse:
+    def focus_profile(name: str, selected: str = "") -> RedirectResponse:
         try:
             processes.focus_profile(profiles.show(name))
         except (ProfileError, ProcessStopError) as exc:
-            return error_redirect(str(exc))
-        return RedirectResponse(url="/", status_code=303)
+            return error_redirect(str(exc), selected or name)
+        return home_redirect(selected or name)
 
     return app

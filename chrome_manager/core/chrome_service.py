@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ctypes
 import socket
 import subprocess
 import time
@@ -10,6 +11,8 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import urlopen
+
+import psutil
 
 from chrome_manager.config import Settings
 from chrome_manager.core.profile_info_extension import ProfileInfoExtension
@@ -55,6 +58,7 @@ class ChromeService:
             "--no-first-run",
             "--no-default-browser-check",
             "--new-window",
+            "--start-minimized",
             f"--load-extension={extension_path}",
         ]
         if profile.proxy_url:
@@ -90,6 +94,8 @@ class ChromeService:
                 )
             raise
 
+        self._minimize_windows(process.pid)
+
         with self.database.transaction() as connection:
             connection.execute("UPDATE profiles SET status = 'running' WHERE id = ?", (profile.id,))
             connection.execute(
@@ -106,6 +112,30 @@ class ChromeService:
                 (profile.id, f"Visible Chrome started with PID {process.pid}"),
             )
         return process.pid
+
+    @staticmethod
+    def _minimize_windows(pid: int) -> None:
+        """Minimize only visible windows owned by the newly started Chrome tree."""
+        try:
+            root = psutil.Process(pid)
+            process_ids = {root.pid, *(child.pid for child in root.children(recursive=True))}
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return
+
+        user32 = ctypes.windll.user32
+        user32.GetWindowThreadProcessId.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+        user32.IsWindowVisible.argtypes = (ctypes.c_void_p,)
+        user32.ShowWindow.argtypes = (ctypes.c_void_p, ctypes.c_int)
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def minimize_window(handle: int, _: int) -> bool:
+            process_id = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(handle, ctypes.byref(process_id))
+            if process_id.value in process_ids and user32.IsWindowVisible(handle):
+                user32.ShowWindow(handle, 6)  # SW_MINIMIZE
+            return True
+
+        user32.EnumWindows(minimize_window, 0)
 
     def _find_chrome(self) -> Path:
         candidates = [Path(self.settings.chrome_path)] if self.settings.chrome_path else []

@@ -3,100 +3,110 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chrome 管理器</title>
-<link rel="stylesheet" href="/static/app.css?v=20260917">
-<script src="/static/app.js?v=20260916" defer>
-</script>
+<title>ChromeManager</title>
+<link rel="stylesheet" href="/static/app.css?v=20260922-time-axis">
+<script src="/static/app.js?v=20260922-time-axis" defer></script>
 </head>
-<body>
-<div class="app-shell">
-<aside class="sidebar">
-<div class="brand">
-<span class="brand-mark">CM</span>
-<span>Chrome<br>管理器</span>
-</div>
-<nav>
-<a href="/dashboard" class="nav-item">🏠 控制台</a>
-<a href="/" class="nav-item active">🧩 实例</a>
-</nav>
-<label class="theme-picker sidebar-theme">🎨 主题<select id="theme-mode"><option value="system">系统（自动）</option><option value="light">明亮 / 白天</option><option value="dark">暗黑 / 晚上</option></select></label>
-</aside>
-<main class="instances-view">
-<header class="instances-header">
-<div>
-<h1>实例</h1>
-</div>
-<div class="header-tools"><label class="sort-picker">排序<select id="profile-sort"><option value="port" {% if sort_by == 'port' %}selected{% endif %}>CDP 端口</option><option value="project" {% if sort_by == 'project' %}selected{% endif %}>项目</option><option value="platform" {% if sort_by == 'platform' %}selected{% endif %}>平台</option><option value="status" {% if sort_by == 'status' %}selected{% endif %}>状态</option></select></label><button id="new-profile-button" class="new-button" type="button">+ 新建</button></div>
-</header>{% if request.query_params.get('error') %}<p class="error">{{ request.query_params.get('error') }}</p>{% endif %}<label class="search-box">
-<span>⌕</span>
-<input id="instance-search" type="search" placeholder="搜索实例...">
-</label>
-<section class="instance-list" id="instance-list">{% for profile in profiles %}{% set status_text = {'running': '运行中', 'stopped': '已停止', 'starting': '启动中', 'stopping': '停止中', 'failed': '启动失败'}.get(profile.status, profile.status) %}{% set display_name = (profile.project_name or '未命名项目') ~ ' + ' ~ (profile.platform or '未指定平台') %}<article class="instance-card" data-search="{{ profile.project_name or '' }} {{ profile.platform or '' }} {{ profile.account_name or '' }} {{ profile.description or '' }}">
-<div class="instance-top">
-<div>
-<h2>{{ display_name }}</h2>
-<p>账号：{{ profile.account_name or '未填写' }} · CDP {{ profile.cdp_port }}</p>
-</div>
-<span class="instance-status status-{{ profile.status }}">
-<i>
-</i>{{ status_text }}</span>
-</div>
-<div class="instance-meta">
-<span>端口 <strong>{{ profile.cdp_port }}</strong>
-</span>
-<span>代理：<strong>{{ profile.proxy_url or '未启用' }}</strong>
-</span>
-</div>
-<div class="instance-footer">
-<span>{{ profile.description or '暂无描述' }}</span>
-<div class="card-actions">{% if profile.status == 'running' %}<form action="/profiles/{{ profile.name }}/focus" method="post" data-preserve-scroll>
-<button class="action-card view" type="submit">👁️ 查看窗口</button>
-</form>
-<form action="/profiles/{{ profile.name }}/stop" method="post" data-preserve-scroll>
-<button class="action-card stop" type="submit">⏹ 停止</button>
-</form>{% elif profile.status == 'stopped' %}<a class="action-card edit" href="/profiles/{{ profile.name }}/edit">✏️ 编辑</a>
-<form action="/profiles/{{ profile.name }}/start" method="post" data-preserve-scroll>
-<button class="action-card start" type="submit">▶ 启动</button>
-</form>
-<form action="/profiles/{{ profile.name }}/delete" method="post">
-<button class="action-card delete" type="submit">🗑 删除</button>
-</form>{% else %}<span class="muted">{{ status_text }}</span>{% endif %}</div>
-</div>
-</article>{% else %}<section class="empty-state">
-<h2>还没有实例</h2>
-<p>创建第一个独立的 Chrome 配置开始管理。</p>
-<button class="new-button" type="button" data-open-new>+ 新建实例</button>
-</section>{% endfor %}</section>
-<div id="new-profile" class="modal-backdrop" hidden>
-<section class="new-profile-panel" role="dialog" aria-modal="true" aria-labelledby="new-profile-title">
-<div class="panel-heading">
-<div>
-<p class="view-kicker">新建实例</p>
-<h2 id="new-profile-title">✨ 新建配置</h2>
-</div>
-<button id="close-new-profile" class="close-button" type="button">×</button>
-</div>
-<form action="/profiles" method="post" class="form">
-<label>CDP 端口<input name="port" type="number" min="9500" max="65535" value="{{ suggested_port }}" required>
-</label>
-<label>项目<input name="project_name" placeholder="可选">
-</label>
-<label>平台<input name="platform" placeholder="可选">
-</label>
-<label>账号<input name="account_name" placeholder="可选">
-</label>
-<label>默认打开网址（可多个）<input name="default_url" type="text" placeholder="https://example.com, https://example.org">
-</label>
-<label class="wide">代理地址（可选）<input name="proxy_url" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080">
-</label>{% if detected_proxy %}<label class="wide checkbox">
-<input name="use_detected_proxy" type="checkbox" value="true"> 使用检测到的本机环境代理：{{ detected_proxy }}</label>{% endif %}<label class="wide">描述<textarea name="description" placeholder="用于说明此配置的用途">
-</textarea>
-</label>
-<button type="submit" class="create-submit">创建并启动</button>
-</form>
-</section>
-</div>
+<body class="win98-page" data-selected-profile-id="{{ selected_profile_id or '' }}">
+<main class="win98-console" aria-label="ChromeManager 管理控制台">
+  <header class="win98-titlebar">
+    <div class="win98-app-title"><span class="pixel-app-icon" aria-hidden="true"></span>ChromeManager</div>
+    <div class="win98-title-actions">
+      <button class="window-control" type="button" title="最小化">_</button>
+      <button class="window-control" type="button" title="最大化">□</button>
+      <button class="window-control close" type="button" title="关闭">×</button>
+    </div>
+  </header>
+
+  <section class="win98-stats" aria-label="状态概览">
+    <article class="stat-block"><span class="stat-icon window-glyph">▣</span><span class="stat-copy"><b>{{ profiles|length }}</b><small>实例</small></span></article>
+    <article class="stat-block"><span class="status-lamp running"></span><span class="stat-copy"><b>{{ profiles | selectattr('status', 'equalto', 'running') | list | length }}</b><small>运行中</small></span></article>
+    <article class="stat-block"><span class="stat-icon">▦</span><span class="stat-copy"><b id="desktop-cpu-summary">{{ system_resources.cpu }}%</b><small>CPU</small></span></article>
+    <article class="stat-block"><span class="stat-icon">▤</span><span class="stat-copy"><b id="desktop-memory-summary">{{ system_resources.memory_percent }}%</b><small>RAM</small></span></article>
+  </section>
+
+  <section class="win98-workspace">
+    <aside class="win98-instance-pane">
+      <div class="win98-pane-caption">实例列表</div>
+      <div id="desktop-instance-list" class="win98-listbox" role="listbox" aria-label="Chrome 实例列表">
+        {% for profile in desktop_profiles %}
+        <button class="win98-list-item {% if profile.id == selected_profile_id %}selected{% endif %}" type="button" role="option" aria-selected="{{ 'true' if profile.id == selected_profile_id else 'false' }}" data-profile-id="{{ profile.id }}" data-status="{{ profile.status }}">
+          <span class="status-lamp {{ 'running' if profile.status in ['running', 'starting'] else ('failed' if profile.status == 'failed' else 'stopped') }}"></span>{{ profile.display_name }}
+        </button>
+        {% else %}
+        <p class="win98-empty">尚未创建实例</p>
+        {% endfor %}
+      </div>
+      <button id="new-profile-button" class="win98-add-button" type="button"><span>+</span> 添加实例</button>
+    </aside>
+
+    <section class="win98-detail-pane" aria-live="polite">
+      <div class="win98-pane-caption" id="detail-title">{% if selected_profile %}{{ selected_profile.display_name }}{% elif desktop_profiles %}{{ desktop_profiles[0].display_name }}{% else %}Chrome 实例{% endif %}</div>
+      <div id="detail-empty" class="win98-detail-empty" {% if desktop_profiles %}hidden{% endif %}>从左侧列表选择实例，或创建第一个实例。</div>
+      <div id="detail-content" {% if not desktop_profiles %}hidden{% endif %}>
+        <p class="detail-status"><span id="detail-lamp" class="status-lamp stopped"></span><strong id="detail-status">已停止</strong></p>
+        <div class="win98-rule"></div>
+        <dl class="win98-info-grid">
+          <div><dt>CPU</dt><dd id="detail-cpu">—</dd></div>
+          <div><dt>Memory</dt><dd id="detail-memory">—</dd></div>
+          <div><dt>PID</dt><dd id="detail-pid">—</dd></div>
+          <div><dt>Port</dt><dd id="detail-port">—</dd></div>
+          <div><dt>Uptime</dt><dd id="detail-uptime">—</dd></div>
+          <div><dt>Proxy</dt><dd id="detail-proxy">直连</dd></div>
+        </dl>
+        <p id="detail-description" class="win98-description"></p>
+        <div class="win98-command-row">
+          <form id="focus-form" method="post" data-preserve-scroll><button class="win98-button" id="focus-button" type="submit">▣ 打开浏览器</button></form>
+          <form id="restart-form" method="post" data-preserve-scroll><button class="win98-button" id="restart-button" type="submit">↻ 重启</button></form>
+          <form id="stop-form" method="post" data-preserve-scroll><button class="win98-button danger" id="stop-button" type="submit">■ 停止</button></form>
+          <form id="start-form" method="post" data-preserve-scroll hidden><button class="win98-button" type="submit">▶ 启动</button></form>
+        </div>
+        <div class="win98-secondary-actions">
+          <a id="edit-link" href="#">编辑配置</a>
+          <form id="delete-form" method="post"><button type="submit">删除实例</button></form>
+        </div>
+        <section class="win98-resource-panel">
+          <div class="win98-subcaption">资源</div>
+          <div class="win98-graphs">
+            <figure><figcaption>CPU (%)</figcaption><canvas id="desktop-cpu-chart" aria-label="当前实例 CPU 趋势图"></canvas></figure>
+            <figure><figcaption>Memory (MB)</figcaption><canvas id="desktop-memory-chart" aria-label="当前实例内存趋势图"></canvas></figure>
+          </div>
+        </section>
+      </div>
+    </section>
+  </section>
+
+  <footer class="win98-statusbar"><span><i class="pixel-app-icon"></i> 就绪</span><time id="desktop-clock"></time></footer>
 </main>
+
+<div id="new-profile" class="modal-backdrop" hidden>
+  <section class="new-profile-panel win98-new-profile" role="dialog" aria-modal="true" aria-labelledby="new-profile-title">
+    <div class="win98-pane-caption" id="new-profile-title">新建 Chrome 实例</div>
+    <form action="/profiles" method="post" class="form">
+      <label>CDP 端口<input name="port" type="number" min="9500" max="65535" value="{{ suggested_port }}" required></label>
+      <label>项目<input name="project_name" placeholder="可选"></label>
+      <label>平台<input name="platform" placeholder="可选"></label>
+      <label>账号<input name="account_name" placeholder="可选"></label>
+      <label>默认打开网址（可多个）<input name="default_url" type="text" placeholder="https://example.com, https://example.org"></label>
+      <label class="wide">代理地址（可选）<input name="proxy_url" placeholder="http://127.0.0.1:7890"></label>
+      {% if detected_proxy %}<label class="wide checkbox"><input name="use_detected_proxy" type="checkbox" value="true"> 使用本机环境代理：{{ detected_proxy }}</label>{% endif %}
+      <label class="wide">描述<textarea name="description" placeholder="用于说明此配置的用途"></textarea></label>
+      <div class="win98-modal-actions"><button type="submit" class="win98-button">创建并启动</button><button id="close-new-profile" type="button" class="win98-button">取消</button></div>
+    </form>
+  </section>
 </div>
+
+<div id="delete-confirmation" class="win98-dialog-backdrop" hidden>
+  <section class="win98-dialog win98-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-confirm-title">
+    <div class="win98-pane-caption" id="delete-confirm-title">确认删除实例</div>
+    <p>确定删除 <strong id="delete-profile-label"></strong> 吗？</p>
+    <p class="win98-dialog-note">此操作不会删除浏览器数据目录，但会从管理列表中移除该实例。</p>
+    <div class="win98-modal-actions"><button id="confirm-delete" class="win98-button danger" type="button">删除</button><button id="cancel-delete" class="win98-button" type="button">取消</button></div>
+  </section>
+</div>
+
+{% if request.query_params.get('error') %}<div class="win98-error" role="alert">{{ request.query_params.get('error') }}</div>{% endif %}
+<script id="desktop-profiles-data" type="application/json">{{ desktop_profiles | tojson }}</script>
+<script id="desktop-resource-data" type="application/json">{{ resource_history | tojson }}</script>
 </body>
 </html>
