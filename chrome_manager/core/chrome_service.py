@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import ctypes
 import socket
 import subprocess
 import time
+from http.client import HTTPException
 from pathlib import Path
-from urllib.error import URLError
 from urllib.parse import quote
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener
 
 import psutil
 
@@ -35,9 +36,10 @@ def is_port_available(port: int) -> bool:
 
 
 class ChromeService:
-    def __init__(self, database: Database, settings: Settings) -> None:
+    def __init__(self, database: Database, settings: Settings, web_port: int = 8765) -> None:
         self.database = database
         self.settings = settings
+        self.web_port = web_port
 
     def start(self, profile: Profile) -> int:
         """Start a normal, visible Chrome window and wait until CDP responds."""
@@ -66,42 +68,47 @@ class ChromeService:
         else:
             # Do not inherit the Windows/system proxy when this Profile has no explicit proxy.
             arguments.append("--no-proxy-server")
-        arguments.append(f"http://127.0.0.1:8765/profiles/{quote(profile.name, safe='')}")
+        arguments.append(f"http://127.0.0.1:{self.web_port}/profiles/{quote(profile.name, safe='')}")
         if profile.default_url:
             arguments.extend(url.strip() for url in profile.default_url.split(",") if url.strip())
         with self.database.transaction() as connection:
-            connection.execute("UPDATE profiles SET status = 'starting' WHERE id = ?", (profile.id,))
+            claimed = connection.execute("UPDATE profiles SET status = 'starting' WHERE id = ? AND status = 'stopped' AND is_deleted = 0", (profile.id,))
+            if claimed.rowcount != 1:
+                raise ChromeStartError("实例状态已改变，请刷新后重试")
             connection.execute(
                 "INSERT INTO events(profile_id, event_type, message) VALUES (?, 'chrome_start', ?)",
                 (profile.id, "Starting headed Chrome window"),
             )
 
         # No CREATE_NO_WINDOW / DETACHED_PROCESS flags: this is intentionally a visible Windows Chrome window.
-        process = subprocess.Popen(arguments)
+        process = None
         try:
+            process = subprocess.Popen(arguments)
+            created_at = psutil.Process(process.pid).create_time()
             self._wait_for_cdp(profile.cdp_port, self.settings.startup_timeout)
-        except ChromeStartError:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
+        except (ChromeStartError, OSError, psutil.Error) as exc:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
             with self.database.transaction() as connection:
-                connection.execute("UPDATE profiles SET status = 'failed' WHERE id = ?", (profile.id,))
+                connection.execute("UPDATE profiles SET status = 'stopped' WHERE id = ?", (profile.id,))
                 connection.execute(
                     "INSERT INTO events(profile_id, event_type, message) VALUES (?, 'chrome_start_failed', ?)",
                     (profile.id, "Chrome did not become CDP-ready"),
                 )
-            raise
-
-        self._minimize_windows(process.pid)
+            logging.getLogger('chrome_manager.lifecycle').exception('实例 %s 启动失败', profile.id)
+            raise ChromeStartError("Chrome 启动失败，请检查 Chrome 路径、端口与错误日志后重试") from exc
 
         with self.database.transaction() as connection:
             connection.execute("UPDATE profiles SET status = 'running' WHERE id = ?", (profile.id,))
             connection.execute(
                 "INSERT INTO runtime_sessions(profile_id, pid, process_create_time, cdp_port, started_at) "
                 "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-                (profile.id, process.pid, time.time(), profile.cdp_port),
+                (profile.id, process.pid, created_at, profile.cdp_port),
             )
             connection.execute(
                 "UPDATE cdp_ports SET last_pid = ?, last_started_at = CURRENT_TIMESTAMP WHERE profile_id = ?",
@@ -111,6 +118,11 @@ class ChromeService:
                 "INSERT INTO events(profile_id, event_type, message) VALUES (?, 'chrome_started', ?)",
                 (profile.id, f"Visible Chrome started with PID {process.pid}"),
             )
+        try:
+            self._minimize_windows(process.pid)
+        except (OSError, AttributeError):
+            logging.getLogger('chrome_manager.lifecycle').exception('实例 %s 已启动，但最小化失败', profile.id)
+        logging.getLogger('chrome_manager.lifecycle').info('实例 %s 已启动，PID=%s', profile.id, process.pid)
         return process.pid
 
     @staticmethod
@@ -152,12 +164,13 @@ class ChromeService:
     def _wait_for_cdp(port: int, timeout: int) -> None:
         deadline = time.monotonic() + timeout
         url = f"http://127.0.0.1:{port}/json/version"
+        opener = build_opener(ProxyHandler({}))
         while time.monotonic() < deadline:
             try:
-                with urlopen(url, timeout=1) as response:  # noqa: S310 - localhost CDP only
+                with opener.open(url, timeout=1) as response:  # noqa: S310 - localhost CDP only
                     payload = json.load(response)
                 if all(field in payload for field in ("Browser", "Protocol-Version", "webSocketDebuggerUrl")):
                     return
-            except (URLError, TimeoutError, json.JSONDecodeError):
+            except (OSError, HTTPException, json.JSONDecodeError):
                 time.sleep(0.25)
         raise ChromeStartError(f"Chrome 在 {timeout} 秒内未能通过 CDP 端口 {port} 就绪")

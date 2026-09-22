@@ -208,7 +208,8 @@ function drawDesktopChart(canvas, metric) {
   const graphWidth = width - left - right, graphHeight = height - top - bottom;
   context.strokeStyle = "#4b4b4b"; context.lineWidth = 1;
   context.font = "9px 'Courier New'"; context.fillStyle = "#c0c0c0";
-  const maximum = metric === "cpu" ? 100 : 1024;
+  const peakMemory = Math.max(0, ...desktopSamples.map(sample => Number(sample.instances?.[String(selectedDesktopProfile.id)]?.memory || 0)));
+  const maximum = metric === "cpu" ? 100 : Math.max(1024, Math.ceil(peakMemory / 512) * 512);
   [maximum, maximum / 2, 0].forEach((value, index) => {
     const y = top + graphHeight * index / 2;
     context.beginPath(); context.moveTo(left, y); context.lineTo(width - right, y); context.stroke();
@@ -216,7 +217,7 @@ function drawDesktopChart(canvas, metric) {
   });
   const values = desktopSamples.map((sample) => Number(sample.instances?.[String(selectedDesktopProfile.id)]?.[metric] || 0));
   if (!values.length) return;
-  const tickIndexes = values.length === 1 ? [0] : [...new Set([0, Math.floor((values.length - 1) / 2), values.length - 1])];
+  const tickIndexes = values.length === 1 ? [0] : graphWidth < 150 ? [0, values.length - 1] : [...new Set([0, Math.floor((values.length - 1) / 2), values.length - 1])];
   tickIndexes.forEach((sampleIndex, tickIndex) => {
     const x = left + (values.length === 1 ? graphWidth / 2 : graphWidth * sampleIndex / (values.length - 1));
     context.beginPath(); context.moveTo(x, top); context.lineTo(x, height - bottom); context.stroke();
@@ -266,8 +267,9 @@ function renderDesktopDetails() {
   detail("edit-link").href = actionPath(profile, "edit");
   const running = profile.status === "running";
   detail("focus-form").hidden = !running; detail("restart-form").hidden = !running; detail("stop-form").hidden = !running;
-  detail("start-form").hidden = running;
-  detail("edit-link").hidden = running; detail("delete-form").hidden = running;
+  const stopped = profile.status === "stopped";
+  detail("start-form").hidden = !stopped;
+  detail("edit-link").hidden = !stopped; detail("delete-form").hidden = !stopped;
   document.querySelectorAll(".win98-list-item").forEach((item) => {
     const selected = String(profile.id) === item.dataset.profileId;
     item.classList.toggle("selected", selected); item.setAttribute("aria-selected", String(selected));
@@ -292,20 +294,32 @@ window.addEventListener("resize", scheduleDesktopCharts);
 
 if (desktopProfilesNode) {
   renderDesktopDetails();
+  let refreshPending = false;
   window.setInterval(async () => {
+    if (refreshPending) return;
+    refreshPending = true;
+    const health = document.getElementById("resource-health");
     try {
-      const response = await fetch("/api/resources");
-      if (!response.ok) return;
-      desktopSamples = (await response.json()).samples || [];
+      const response = await fetch("/api/resources", {signal: AbortSignal.timeout(8000)});
+      if (!response.ok) throw new Error("resource refresh failed");
+      const payload = await response.json();
+      desktopSamples = payload.samples || [];
+      if (health) health.textContent = payload.warning || "";
       const latest = desktopSamples.at(-1);
       if (latest?.system) {
         detail("desktop-cpu-summary").textContent = `${latest.system.cpu}%`;
         detail("desktop-memory-summary").textContent = `${latest.system.memory_percent}%`;
       }
-      const instance = latest?.instances?.[String(selectedDesktopProfile?.id)];
-      if (instance && selectedDesktopProfile) { selectedDesktopProfile.cpu = instance.cpu; selectedDesktopProfile.memory = instance.memory; }
+      desktopProfiles.forEach(profile => {
+        const instance = latest?.instances?.[String(profile.id)];
+        if (instance) Object.assign(profile, {cpu: instance.cpu, memory: instance.memory, status: instance.status || profile.status});
+        const lamp = document.querySelector(`[data-profile-id="${profile.id}"] .status-lamp`);
+        if (lamp) lamp.className = `status-lamp ${["running", "starting"].includes(profile.status) ? "running" : "stopped"}`;
+      });
       renderDesktopDetails();
-    } catch { /* A transient local refresh error does not interrupt management. */ }
+    } catch {
+      if (health) health.textContent = "无法连接管理服务，数据未更新；正在重试";
+    } finally { refreshPending = false; }
   }, 10000);
 }
 

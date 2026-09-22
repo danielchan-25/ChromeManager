@@ -20,6 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8,<9",
+    "httpx>=0.27,<1",
 ]
 
 [project.scripts]
@@ -31,3 +32,6 @@ addopts = "-q"
 
 [tool.setuptools.packages.find]
 include = ["chrome_manager*"]
+
+[tool.setuptools.package-data]
+chrome_manager = ["templates/*.html", "static/*.css", "static/*.js"]

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ChromeManager</title>
 <link rel="stylesheet" href="/static/app.css?v=20260922-time-axis">
-<script src="/static/app.js?v=20260922-time-axis" defer></script>
+<script src="/static/app.js?v=20260922-audit-2" defer></script>
 </head>
 <body class="win98-page" data-selected-profile-id="{{ selected_profile_id or '' }}">
 <main class="win98-console" aria-label="ChromeManager 管理控制台">
@@ -67,6 +67,7 @@
         </div>
         <section class="win98-resource-panel">
           <div class="win98-subcaption">资源</div>
+          <p id="resource-health" role="status" aria-live="polite"></p>
           <div class="win98-graphs">
             <figure><figcaption>CPU (%)</figcaption><canvas id="desktop-cpu-chart" aria-label="当前实例 CPU 趋势图"></canvas></figure>
             <figure><figcaption>Memory (MB)</figcaption><canvas id="desktop-memory-chart" aria-label="当前实例内存趋势图"></canvas></figure>

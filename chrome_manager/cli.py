@@ -129,15 +129,17 @@ def web(
 
     settings, _ = initialize()
     if dry_run:
-        create_app()
+        create_app(web_port=port)
         console.print(f"[green]Dry run passed:[/green] Chrome Manager 管理服务可在 http://127.0.0.1:{port} 启动")
         return
-    capture_web_console(settings.data_root / "logs", settings.log_max_size_mb, settings.log_backup_count)
     console.print(f"Chrome Manager console: http://127.0.0.1:{port}")
     console.print("按 Ctrl+C 可停止管理服务。")
     try:
         # uvicorn.run blocks in the current terminal; do not detach or create a background process.
-        uvicorn.run(create_app(), host="127.0.0.1", port=port)
+        config = uvicorn.Config(create_app(web_port=port), host="127.0.0.1", port=port)
+        # Attach after Uvicorn configures its handlers, otherwise it discards file logging.
+        capture_web_console(settings.data_root / "logs", settings.log_max_size_mb, settings.log_backup_count)
+        uvicorn.Server(config).run()
     except KeyboardInterrupt:
         console.print("Chrome Manager 管理服务已停止。")
 

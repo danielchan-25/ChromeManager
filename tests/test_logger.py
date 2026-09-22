@@ -2,6 +2,16 @@ import logging
 from pathlib import Path
 
 from chrome_manager.utils.logger import configure_logging
+from chrome_manager.utils.logger import RedactingFormatter
+
+
+def test_exception_and_authorization_are_redacted():
+    record = logging.LogRecord('test', logging.ERROR, '', 0,
+        'Authorization: Bearer secret-value http://user:private@localhost token=hidden', (), None)
+    output = RedactingFormatter('%(message)s').format(record)
+    assert 'secret-value' not in output
+    assert 'private' not in output
+    assert 'hidden' not in output
 
 
 def test_logger_masks_sensitive_values(tmp_path: Path) -> None:

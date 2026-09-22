@@ -138,7 +138,9 @@ class ProfileManager:
     def _validate_name(name: str) -> None:
         if not name or name.strip() != name:
             raise ProfileError("Profile 名称不能为空，且不能包含首尾空格")
-        if len(name) > 100 or _INVALID_PROFILE_NAME.search(name):
+        if (len(name) > 100 or _INVALID_PROFILE_NAME.search(name) or name.endswith('.')
+                or name.split('.')[0].upper() in {'CON', 'PRN', 'AUX', 'NUL',
+                    *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}):
             raise ProfileError("Profile 名称包含 Windows 路径非法字符")
 
     @staticmethod
@@ -149,7 +151,11 @@ class ProfileManager:
         if not values:
             return None
         for value in values:
-            parsed = urlsplit(value)
+            try:
+                parsed = urlsplit(value)
+                parsed.port
+            except ValueError as exc:
+                raise ProfileError("默认打开网址格式不正确") from exc
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ProfileError("每个默认打开网址都必须是完整的 http 或 https 地址，多个网址请用逗号分隔")
         return ", ".join(values)
@@ -158,12 +164,19 @@ class ProfileManager:
     def _parse_proxy(proxy_url: str | None) -> tuple[str, str, int] | None:
         if not proxy_url:
             return None
-        parsed = urlsplit(proxy_url.strip())
+        try:
+            parsed = urlsplit(proxy_url.strip())
+            parsed.port
+        except ValueError as exc:
+            raise ProfileError("代理地址或端口格式不正确") from exc
         if parsed.scheme not in {"http", "https", "socks5"} or not parsed.hostname or parsed.port is None:
             raise ProfileError("代理地址必须为 http、https 或 socks5 格式，例如 http://127.0.0.1:7890")
         if parsed.username or parsed.password:
             raise ProfileError("当前版本不支持带用户名或密码的代理地址")
-        return parsed.scheme, parsed.hostname, parsed.port
+        if parsed.port == 0 or parsed.path not in {'', '/'} or parsed.query or parsed.fragment:
+            raise ProfileError("代理地址只能包含协议、主机和有效端口")
+        host = f'[{parsed.hostname}]' if ':' in parsed.hostname else parsed.hostname
+        return parsed.scheme, host, parsed.port
 
     @staticmethod
     def _find_auto_port(connection: sqlite3.Connection) -> int:

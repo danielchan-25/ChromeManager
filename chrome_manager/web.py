@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import os
+import logging
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Event, Lock, Thread
 from urllib.parse import quote
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import psutil
@@ -20,6 +24,7 @@ from chrome_manager.core.chrome_service import ChromeService, ChromeStartError
 from chrome_manager.core.profile_manager import ProfileError, ProfileManager
 from chrome_manager.core.process_manager import ProcessManager, ProcessStopError
 from chrome_manager.db.database import Database
+from chrome_manager.utils.logger import configure_logging
 
 PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
@@ -37,6 +42,7 @@ def home_redirect(selected: str = "", error: str = "") -> RedirectResponse:
 
 def error_redirect(message: str, selected: str = "") -> RedirectResponse:
     """Return user-facing validation failures without exposing a server error page."""
+    logging.getLogger('chrome_manager.web').warning('操作失败：%s', message)
     return home_redirect(selected, message)
 
 
@@ -69,7 +75,7 @@ def runtime_details(database: Database) -> dict[int, dict[str, object]]:
     with database.read() as connection:
         rows = connection.execute(
             "SELECT profile_id, pid, started_at FROM runtime_sessions "
-            "WHERE stopped_at IS NULL ORDER BY id DESC"
+            "WHERE stopped_at IS NULL ORDER BY id ASC"
         ).fetchall()
     return {
         int(row["profile_id"]): {"pid": row["pid"], "started_at": row["started_at"]}
@@ -106,7 +112,7 @@ def resource_snapshot(database: Database) -> tuple[dict[str, float], dict[int, d
                 memory += process.memory_info().rss / 1024 / 1024
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
-        per_profile[profile_id] = {"cpu": round(cpu, 1), "memory": round(memory, 1)}
+        per_profile[profile_id] = {"cpu": round(cpu / (psutil.cpu_count() or 1), 1), "memory": round(memory, 1)}
     memory = psutil.virtual_memory()
     system = {"cpu": round(psutil.cpu_percent(interval=None), 1), "memory_used": round(memory.used / 1024 / 1024 / 1024, 1),
               "memory_total": round(memory.total / 1024 / 1024 / 1024, 1), "memory_percent": round(memory.percent, 1)}
@@ -119,24 +125,27 @@ class ResourceMonitor:
     def __init__(self, database: Database, profiles: ProfileManager) -> None:
         self.database = database
         self.profiles = profiles
-        self.history: deque[dict[str, object]] = deque(maxlen=30)
+        self.history: deque[dict[str, object]] = deque(maxlen=31)
+        self.error: str | None = None
         self.lock = Lock()
         self.stop_event = Event()
         self.thread: Thread | None = None
 
     def sample(self) -> dict[str, object]:
+        ProcessManager(self.database, 10).reconcile()
         profile_list = self.profiles.list()
         system, usage = resource_snapshot(self.database)
         snapshot = {
             "timestamp": int(time.time()),
             "system": system,
             "instances": {
-                str(profile.id): {"name": display_profile_name(profile), **usage.get(profile.id, {"cpu": 0.0, "memory": 0.0})}
+                str(profile.id): {"name": display_profile_name(profile), "status": profile.status, **usage.get(profile.id, {"cpu": 0.0, "memory": 0.0})}
                 for profile in profile_list
             },
         }
         with self.lock:
             self.history.append(snapshot)
+            self.error = None
         return snapshot
 
     def samples(self) -> list[dict[str, object]]:
@@ -150,36 +159,59 @@ class ResourceMonitor:
 
         def collect() -> None:
             while not self.stop_event.wait(10):
-                self.sample()
+                try:
+                    self.sample()
+                except Exception:
+                    self.error = '资源采集失败，正在重试；显示的是上次采样数据'
+                    logging.getLogger('chrome_manager.monitor').exception(self.error)
 
         self.thread = Thread(target=collect, name="chrome-manager-resource-monitor", daemon=True)
         self.thread.start()
 
     def stop(self) -> None:
         self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=6)
 
 
-def create_app() -> FastAPI:
+def create_app(web_port: int = 8765) -> FastAPI:
     settings = load_settings()
     ensure_data_directories(settings)
+    configure_logging(settings.data_root / 'logs', settings.log_max_size_mb, settings.log_backup_count)
     write_default_settings(settings)
     database = Database(settings.database_path)
     database.initialize()
     profiles = ProfileManager(database, settings.data_root / "profiles")
-    chrome = ChromeService(database, settings)
+    chrome = ChromeService(database, settings, web_port)
     processes = ProcessManager(database, settings.shutdown_timeout)
     resources = ResourceMonitor(database, profiles)
 
-    app = FastAPI(title="Chrome Manager", docs_url=None, redoc_url=None)
-    app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
-
-    @app.on_event("startup")
-    def start_resource_monitor() -> None:
+    @asynccontextmanager
+    async def lifespan(app):
         resources.start()
+        try:
+            yield
+        finally:
+            resources.stop()
 
-    @app.on_event("shutdown")
-    def stop_resource_monitor() -> None:
-        resources.stop()
+    app = FastAPI(title="Chrome Manager", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', '[::1]', 'testserver'])
+
+    @app.middleware('http')
+    async def protect_local_actions(request: Request, call_next):
+        if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
+            origin = request.headers.get('origin')
+            if origin and origin != f'{request.url.scheme}://{request.headers.get("host")}':
+                return JSONResponse({'detail': '拒绝跨站修改请求'}, status_code=403)
+            if request.headers.get('sec-fetch-site') == 'cross-site':
+                return JSONResponse({'detail': '拒绝跨站修改请求'}, status_code=403)
+        try:
+            return await call_next(request)
+        except Exception:
+            logging.getLogger('chrome_manager.web').exception('请求失败：%s %s', request.method, request.url.path)
+            return JSONResponse({'detail': '管理服务发生异常，请查看 logs/error.log 后重试'}, status_code=500)
+
+    app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard() -> RedirectResponse:
@@ -190,7 +222,7 @@ def create_app() -> FastAPI:
     def resource_history() -> dict[str, object]:
         if not resources.samples():
             resources.sample()
-        return {"samples": resources.samples()}
+        return {"samples": resources.samples(), "warning": resources.error}
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
@@ -235,7 +267,7 @@ def create_app() -> FastAPI:
     @app.get("/profiles")
     def profiles_index() -> RedirectResponse:
         """Keep direct navigation to the profile collection on the management page."""
-        return home_redirect(profile.name)
+        return home_redirect()
 
     @app.post("/profiles")
     def create_profile(
@@ -254,7 +286,7 @@ def create_app() -> FastAPI:
             chrome.start(profile)
         except (ProfileError, ChromeStartError, ValueError) as exc:
             return error_redirect(str(exc))
-        return RedirectResponse(url="/", status_code=303)
+        return home_redirect(profile.name)
 
     @app.get("/profiles/{name}", response_class=HTMLResponse)
     def profile_detail(request: Request, name: str) -> HTMLResponse:
@@ -270,6 +302,8 @@ def create_app() -> FastAPI:
             profile = profiles.show(name)
         except ProfileError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if profile.status != 'stopped':
+            return error_redirect('请先停止实例后再编辑', name)
         return templates.TemplateResponse(
             request, "edit_profile.html", {"profile": profile}
         )
@@ -281,6 +315,8 @@ def create_app() -> FastAPI:
         proxy_enabled: bool = Form(False),
     ) -> RedirectResponse:
         try:
+            if proxy_enabled and not proxy_url.strip():
+                raise ProfileError('启用代理时必须填写代理地址')
             profiles.update(
                 name, project_name=project_name or None, platform=platform or None, account_name=account_name or None,
                 description=description or None, default_url=default_url or None,

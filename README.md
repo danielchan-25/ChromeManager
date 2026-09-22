@@ -138,3 +138,25 @@ git status
 ```
 
 本项目以 [MIT License](LICENSE) 发布。
+
+## 异常处理与日志
+
+管理服务每 10 秒采集资源并核对运行进程；手动关闭 Chrome 后，实例会同步为已停止。资源采集异常会保留上次数据、在页面显示告警，并在下个采样周期重试；页面无法连接管理服务时也会显示提示。此版本的告警为本机页面和控制台提示，不包含邮件或第三方消息通知。
+
+启动进程失败后恢复为已停止，可检查原因后重试。停止实例时优先请求 Chrome 正常关闭，超过配置的 `shutdown_timeout` 才强制结束并记入日志；强制结束仍可能丢失尚未写盘的数据。
+
+日志位于数据根目录的 `logs` 文件夹（默认 `D:/ChromeManager/logs`）：
+
+- `chrome_manager.log`：应用操作、启动/停止、状态同步与异常。
+- `error.log`：应用异常及堆栈。
+- `console.log`：Web 服务访问和运行日志。
+
+日志使用 UTF-8 编码并按 `settings.toml` 中的 `logging.max_size_mb` 与 `backup_count` 轮转。常见密码、令牌、Authorization 及 URL 中的凭据会脱敏；分享日志前仍应检查项目名、路径等业务信息。管理服务仅用于本机，请勿直接向公网暴露。
+
+真实 Chrome 回归测试需在 Windows 上显式开启，测试使用临时目录和独立端口，验证启动、正常停止、再次启动、手动关闭后的状态同步及日志写入：
+
+```powershell
+$env:CHROME_MANAGER_LIVE_TEST = "1"
+python -m pytest
+Remove-Item Env:CHROME_MANAGER_LIVE_TEST
+```
