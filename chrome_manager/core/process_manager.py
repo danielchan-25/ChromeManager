@@ -120,30 +120,97 @@ class ProcessManager:
         user32.GetForegroundWindow.restype = ctypes.c_void_p
         user32.GetWindowThreadProcessId.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
         user32.IsWindowVisible.argtypes = (ctypes.c_void_p,)
+        user32.GetWindow.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+        user32.GetWindow.restype = ctypes.c_void_p
+        user32.GetClassNameW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int)
+        user32.IsIconic.argtypes = (ctypes.c_void_p,)
+        user32.ShowWindow.argtypes = (ctypes.c_void_p, ctypes.c_int)
         user32.SetForegroundWindow.argtypes = (ctypes.c_void_p,)
+        user32.SetForegroundWindow.restype = ctypes.c_bool
+        user32.BringWindowToTop.argtypes = (ctypes.c_void_p,)
+        user32.SetActiveWindow.argtypes = (ctypes.c_void_p,)
+        user32.SetFocus.argtypes = (ctypes.c_void_p,)
         user32.SetWindowPos.argtypes = (
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
             ctypes.c_int, ctypes.c_int, ctypes.c_uint,
         )
-        window = ctypes.c_void_p()
+        user32.GetWindowThreadProcessId.restype = ctypes.c_ulong
+        user32.AttachThreadInput.argtypes = (ctypes.c_ulong, ctypes.c_ulong, ctypes.c_bool)
+        user32.AttachThreadInput.restype = ctypes.c_bool
+        user32.AllowSetForegroundWindow.argtypes = (ctypes.c_ulong,)
+        user32.AllowSetForegroundWindow.restype = ctypes.c_bool
+        user32.PeekMessageW.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint)
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentThreadId.restype = ctypes.c_ulong
+        candidates: list[tuple[int, int]] = []
 
         @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
         def find_window(handle: int, _: int) -> bool:
             process_id = ctypes.c_ulong()
             user32.GetWindowThreadProcessId(handle, ctypes.byref(process_id))
-            if process_id.value in process_ids and user32.IsWindowVisible(handle):
-                window.value = handle
-                return False
+            if (process_id.value in process_ids and user32.IsWindowVisible(handle)
+                    and not user32.GetWindow(handle, 4)):  # GW_OWNER: skip Chrome popups/tooltips
+                class_name = ctypes.create_unicode_buffer(128)
+                user32.GetClassNameW(handle, class_name, len(class_name))
+                rank = 0 if class_name.value == 'Chrome_WidgetWin_1' else 1
+                candidates.append((rank, handle))
             return True
 
         user32.EnumWindows(find_window, 0)
-        if not window.value:
+        if not candidates:
             raise ProcessStopError("未找到该 Profile 的可见 Chrome 窗口")
-        top_flags = 0x0001 | 0x0002 | 0x0040  # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
-        if user32.GetForegroundWindow() == window.value:
-            user32.SetWindowPos(window, ctypes.c_void_p(0), 0, 0, 0, 0, top_flags)  # HWND_TOP
-            return
-        user32.ShowWindow(window, 9)  # SW_RESTORE
-        user32.SetWindowPos(window, ctypes.c_void_p(0), 0, 0, 0, 0, top_flags)  # HWND_TOP
-        if not user32.SetForegroundWindow(window) and user32.GetForegroundWindow() != window.value:
-            raise ProcessStopError("Windows 拒绝将 Chrome 窗口切换到前台")
+        window = ctypes.c_void_p(min(candidates, key=lambda candidate: candidate[0])[1])
+        def window_owner(handle: int | None) -> tuple[int, int]:
+            owner = ctypes.c_ulong()
+            thread = user32.GetWindowThreadProcessId(handle, ctypes.byref(owner)) if handle else 0
+            return owner.value, thread
+
+        target_thread = window_owner(window.value)[1]
+        foreground = user32.GetForegroundWindow()
+        foreground_thread = window_owner(foreground)[1]
+        current_thread = kernel32.GetCurrentThreadId()
+
+        class Message(ctypes.Structure):
+            _fields_ = [
+                ("hwnd", ctypes.c_void_p), ("message", ctypes.c_uint),
+                ("wParam", ctypes.c_size_t), ("lParam", ctypes.c_ssize_t),
+                ("time", ctypes.c_uint), ("pt_x", ctypes.c_long), ("pt_y", ctypes.c_long),
+            ]
+
+        # A Uvicorn worker thread may not yet have a Win32 message queue; AttachThreadInput
+        # fails for such threads. Create one before temporarily sharing the input queues.
+        message = Message()
+        user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 0)
+        user32.AllowSetForegroundWindow(root.pid)
+        attached: list[tuple[int, int]] = []
+        for thread_id in dict.fromkeys((foreground_thread, target_thread)):
+            if thread_id and thread_id != current_thread and user32.AttachThreadInput(current_thread, thread_id, True):
+                attached.append((current_thread, thread_id))
+
+        try:
+            # Restore even when the window is visible but covered by another window.
+            user32.ShowWindow(window, 9)  # SW_RESTORE
+            top_flags = 0x0001 | 0x0002 | 0x0040  # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+            user32.SetWindowPos(window, ctypes.c_void_p(0), 0, 0, 0, 0, top_flags)
+            user32.BringWindowToTop(window)
+            user32.SetActiveWindow(window)
+            user32.SetFocus(window)
+            user32.SetForegroundWindow(window)
+            # Verify the foreground owner, rather than trusting the API's return value alone.
+            foreground = user32.GetForegroundWindow()
+            foreground_owner = window_owner(foreground)[0]
+            if foreground_owner not in process_ids:
+                user32.AllowSetForegroundWindow(root.pid)
+                user32.BringWindowToTop(window)
+                user32.SetForegroundWindow(window)
+                foreground = user32.GetForegroundWindow()
+                foreground_owner = window_owner(foreground)[0]
+            if foreground_owner not in process_ids:
+                logging.getLogger('chrome_manager.lifecycle').error(
+                    '无法将实例 %s 的 Chrome 窗口激活到前台：目标 HWND=%s，目标线程=%s，当前前台线程=%s',
+                    profile.id, window.value, target_thread, foreground_thread,
+                )
+                raise ProcessStopError("Windows 仍阻止窗口前台激活，请检查是否以不同权限运行 Chrome Manager 和 Chrome")
+        finally:
+            for source_thread, destination_thread in reversed(attached):
+                user32.AttachThreadInput(source_thread, destination_thread, False)
