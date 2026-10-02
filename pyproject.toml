@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chrome-manager"
-version = "0.1.0"
+version = "0.2.0"
 description = "Windows web console for isolated Chrome profiles and CDP endpoints"
 requires-python = ">=3.12"
 dependencies = [

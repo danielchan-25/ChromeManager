@@ -5,9 +5,12 @@ from __future__ import annotations
 import os
 import logging
 import json
+import subprocess
+import sys
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock, Thread
 from urllib.parse import quote
@@ -19,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import psutil
 
+from chrome_manager import __version__
 from chrome_manager.config import ensure_data_directories, load_settings, write_default_settings
 from chrome_manager.core.chrome_service import ChromeService, ChromeStartError
 from chrome_manager.core.backup_manager import BackupError, BackupManager
@@ -30,6 +34,35 @@ from chrome_manager.utils.logger import configure_logging
 
 PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
+
+
+def version_info() -> dict[str, object]:
+    """Capture deployment identity once, rather than reading Git on each request."""
+    project_path = PACKAGE_DIR.resolve().parent
+    commit = None
+    dirty = None
+    if (project_path / ".git").exists():
+        try:
+            options = {
+                "capture_output": True, "text": True, "encoding": "utf-8",
+                "errors": "replace", "check": True, "timeout": 2,
+                "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            }
+            commit = subprocess.run(
+                ["git", "-C", str(project_path), "rev-parse", "--verify", "HEAD"], **options,
+            ).stdout.strip()
+            dirty = bool(subprocess.run(
+                ["git", "-C", str(project_path), "status", "--porcelain", "--untracked-files=normal"], **options,
+            ).stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            commit = None
+            dirty = None
+    return {
+        "name": "ChromeManager", "version": __version__,
+        "git_commit": commit, "git_dirty": dirty,
+        "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "project_path": str(project_path), "python_executable": sys.executable,
+    }
 
 
 def home_redirect(selected: str = "", error: str = "", notice: str = "") -> RedirectResponse:
@@ -215,6 +248,7 @@ class ResourceMonitor:
 
 
 def create_app(web_port: int = 8765) -> FastAPI:
+    deployment_version = version_info()
     settings = load_settings()
     ensure_data_directories(settings)
     configure_logging(settings.data_root / 'logs', settings.log_max_size_mb, settings.log_backup_count)
@@ -239,7 +273,7 @@ def create_app(web_port: int = 8765) -> FastAPI:
             cdp_monitor.stop()
             resources.stop()
 
-    app = FastAPI(title="Chrome Manager", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app = FastAPI(title="Chrome Manager", version=__version__, docs_url=None, redoc_url=None, lifespan=lifespan)
 
     @app.middleware('http')
     async def log_request_errors(request: Request, call_next):
@@ -250,6 +284,10 @@ def create_app(web_port: int = 8765) -> FastAPI:
             return JSONResponse({'detail': '管理服务发生异常，请查看 logs/error.log 后重试'}, status_code=500)
 
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
+
+    @app.get("/version")
+    def version() -> JSONResponse:
+        return JSONResponse(deployment_version, headers={"Cache-Control": "no-store"})
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard() -> RedirectResponse:

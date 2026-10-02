@@ -1,5 +1,6 @@
 from pathlib import Path
 from http.client import BadStatusLine
+import subprocess
 from unittest.mock import Mock
 
 import psutil
@@ -15,6 +16,8 @@ from chrome_manager.db.database import Database
 from chrome_manager.web import create_app
 from chrome_manager.web import ResourceMonitor
 from chrome_manager.cli import app as cli_app
+from chrome_manager import __version__
+from chrome_manager.web import version_info
 
 
 @pytest.fixture
@@ -83,6 +86,63 @@ def test_web_routes_without_login(tmp_path, monkeypatch):
         assert client.get('/api/resources').json()['samples']
         assert client.post('/profiles/missing/stop', headers={'Origin': 'https://example.invalid'}, follow_redirects=False).status_code == 303
         assert client.get('/profiles/missing').status_code == 404
+
+
+def test_version_route_captures_startup_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv('CHROME_MANAGER_DATA_ROOT', str(tmp_path))
+    (tmp_path / '.git').mkdir()
+    package_dir = tmp_path / 'chrome_manager'
+    package_dir.mkdir()
+    run = Mock(side_effect=[Mock(stdout='a' * 40 + '\n'), Mock(stdout=' M README.md\n')])
+    monkeypatch.setattr('chrome_manager.web.subprocess.run', run)
+    with monkeypatch.context() as context:
+        context.setattr('chrome_manager.web.PACKAGE_DIR', package_dir)
+        startup_info = version_info()
+    capture = Mock(return_value=startup_info)
+    monkeypatch.setattr('chrome_manager.web.version_info', capture)
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.get('/version')
+        assert response.status_code == 200
+        assert response.headers['cache-control'] == 'no-store'
+        info = response.json()
+        assert info['version'] == __version__ == app.version
+        assert info['git_commit'] == 'a' * 40
+        assert info['git_dirty'] is True
+        assert Path(info['project_path']).is_absolute()
+        assert Path(info['python_executable']).is_absolute()
+        assert info['started_at'].endswith('+00:00')
+        assert client.get('/version').json() == info
+        assert run.call_count == 2
+        capture.assert_called_once()
+
+
+def test_version_without_git_repository(tmp_path, monkeypatch):
+    package_dir = tmp_path / 'chrome_manager'
+    package_dir.mkdir()
+    monkeypatch.setattr('chrome_manager.web.PACKAGE_DIR', package_dir)
+    run = Mock()
+    monkeypatch.setattr('chrome_manager.web.subprocess.run', run)
+    info = version_info()
+    assert info['git_commit'] is None
+    assert info['git_dirty'] is None
+    assert info['version'] == __version__
+    assert info['project_path'] == str(tmp_path.resolve())
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize('error', [FileNotFoundError(), subprocess.TimeoutExpired('git', 2),
+                                  subprocess.CalledProcessError(128, 'git')])
+def test_version_git_failure_is_optional(tmp_path, monkeypatch, error):
+    (tmp_path / '.git').mkdir()
+    package_dir = tmp_path / 'chrome_manager'
+    package_dir.mkdir()
+    monkeypatch.setattr('chrome_manager.web.PACKAGE_DIR', package_dir)
+    monkeypatch.setattr('chrome_manager.web.subprocess.run', Mock(side_effect=error))
+    info = version_info()
+    assert info['git_commit'] is None
+    assert info['git_dirty'] is None
+    assert info['version'] == __version__
 
 
 def test_edit_invalid_proxy_and_running_profile(tmp_path, monkeypatch):
