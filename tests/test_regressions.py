@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import psutil
 import pytest
 from fastapi.testclient import TestClient
+from typer.testing import CliRunner
 
 from chrome_manager.config import Settings
 from chrome_manager.core.chrome_service import ChromeService, ChromeStartError
@@ -13,6 +14,7 @@ from chrome_manager.core.profile_manager import ProfileManager, ProfileError
 from chrome_manager.db.database import Database
 from chrome_manager.web import create_app
 from chrome_manager.web import ResourceMonitor
+from chrome_manager.cli import app as cli_app
 
 
 @pytest.fixture
@@ -70,13 +72,16 @@ def test_manual_exit_reconciled(profiles, monkeypatch):
     assert profiles.show('closed').status == 'stopped'
 
 
-def test_web_routes_and_cross_site_guard(tmp_path, monkeypatch):
+def test_web_routes_without_login(tmp_path, monkeypatch):
     monkeypatch.setenv('CHROME_MANAGER_DATA_ROOT', str(tmp_path))
+    monkeypatch.delenv('CHROME_MANAGER_WEB_PASSWORD', raising=False)
     with TestClient(create_app()) as client:
+        assert client.get('/').status_code == 200
+        assert client.get('/health').json()['status'] == 'ok'
         assert client.get('/profiles', follow_redirects=False).status_code == 303
         assert client.get('/').status_code == 200
         assert client.get('/api/resources').json()['samples']
-        assert client.post('/profiles', headers={'Origin': 'https://evil.example'}).status_code == 403
+        assert client.post('/profiles/missing/stop', headers={'Origin': 'https://example.invalid'}, follow_redirects=False).status_code == 303
         assert client.get('/profiles/missing').status_code == 404
 
 
@@ -93,6 +98,62 @@ def test_edit_invalid_proxy_and_running_profile(tmp_path, monkeypatch):
         with database.transaction() as db:
             db.execute("UPDATE profiles SET status='starting' WHERE id=?", (profile.id,))
         assert client.get('/profiles/edit/edit', follow_redirects=False).status_code == 303
+
+
+def test_profile_info_accessible_from_lan_without_login(tmp_path, monkeypatch):
+    monkeypatch.setenv('CHROME_MANAGER_DATA_ROOT', str(tmp_path))
+    app = create_app()
+    manager = ProfileManager(Database(tmp_path / 'data' / 'chrome_manager.db'), tmp_path / 'profiles')
+    manager.create('info', cdp_port=9511)
+    with TestClient(app, client=('127.0.0.1', 12345)) as client:
+        assert client.get('/profiles/info').status_code == 200
+        assert client.get('/').status_code == 200
+    with TestClient(app, client=('192.168.1.20', 12345)) as client:
+        assert client.get('/profiles/info').status_code == 200
+
+
+def test_resource_history_survives_monitor_restart(profiles):
+    first = ResourceMonitor(profiles.database, profiles)
+    snapshot = first.sample()
+    second = ResourceMonitor(profiles.database, profiles)
+    assert second.samples()[-1] == snapshot
+    with profiles.database.read() as db:
+        assert db.execute('SELECT COUNT(*) FROM resource_samples').fetchone()[0] == 1
+
+
+def test_resource_alerts_require_sustained_pressure(profiles):
+    monitor = ResourceMonitor(profiles.database, profiles)
+    now = int(__import__('time').time())
+    for index in range(17):
+        monitor.history.append({'timestamp': now - (17 - index) * 10,
+                                'system': {'cpu': 96, 'memory_percent': 91}})
+    assert monitor.alerts() == ['本机 CPU 连续约 30 秒达到 95%']
+    monitor.history.append({'timestamp': now, 'system': {'cpu': 96, 'memory_percent': 91}})
+    assert '本机内存连续约 3 分钟达到 90%' in monitor.alerts()
+    monitor.history.append({'timestamp': now + 10, 'system': {'cpu': 20, 'memory_percent': 80}})
+    assert monitor.alerts() == []
+
+
+def test_initial_resource_failure_keeps_page_available(tmp_path, monkeypatch):
+    monkeypatch.setenv('CHROME_MANAGER_DATA_ROOT', str(tmp_path))
+    monkeypatch.setattr('chrome_manager.web.resource_snapshot', Mock(side_effect=RuntimeError('sensor failed')))
+    with TestClient(create_app()) as client:
+        assert client.get('/').status_code == 200
+        assert client.get('/health').status_code == 503
+        payload = client.get('/api/resources').json()
+        assert payload['samples'] == []
+        assert '资源采集失败' in payload['warning']
+
+
+def test_cli_only_exposes_web(tmp_path):
+    runner = CliRunner()
+    environment = {
+        'CHROME_MANAGER_DATA_ROOT': str(tmp_path),
+    }
+    result = runner.invoke(cli_app, ['web', '--dry-run'], env=environment)
+    assert result.exit_code == 0, result.output
+    assert '检查通过' in result.output
+    assert runner.invoke(cli_app, ['create', 'demo'], env=environment).exit_code != 0
 
 
 def test_monitor_recovers_after_sample_error(profiles, monkeypatch):

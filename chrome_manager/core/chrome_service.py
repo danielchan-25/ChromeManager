@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import ctypes
+import os
+import shutil
 import socket
 import subprocess
 import time
@@ -15,7 +17,7 @@ from urllib.request import ProxyHandler, build_opener
 
 import psutil
 
-from chrome_manager.config import Settings
+from chrome_manager.config import DEFAULT_DATA_ROOT, Settings
 from chrome_manager.core.profile_info_extension import ProfileInfoExtension
 from chrome_manager.db.database import Database
 from chrome_manager.db.repository import Profile
@@ -150,11 +152,19 @@ class ChromeService:
         user32.EnumWindows(minimize_window, 0)
 
     def _find_chrome(self) -> Path:
-        candidates = [Path(self.settings.chrome_path)] if self.settings.chrome_path else []
-        candidates.extend([
-            Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
-            Path("C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"),
-        ])
+        candidates = []
+        if self.settings.chrome_path:
+            configured = Path(self.settings.chrome_path).expanduser()
+            candidates.append(configured if configured.is_absolute() else DEFAULT_DATA_ROOT.parent / configured)
+        for variable, suffix in (
+            ("PROGRAMFILES", "Google/Chrome/Application/chrome.exe"),
+            ("PROGRAMFILES(X86)", "Google/Chrome/Application/chrome.exe"),
+            ("LOCALAPPDATA", "Google/Chrome/Application/chrome.exe"),
+        ):
+            if base := os.environ.get(variable):
+                candidates.append(Path(base) / suffix)
+        if chrome_on_path := shutil.which("chrome.exe"):
+            candidates.append(Path(chrome_on_path))
         for candidate in candidates:
             if candidate.is_file():
                 return candidate

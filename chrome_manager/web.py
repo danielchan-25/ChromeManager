@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import logging
+import json
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -14,13 +15,14 @@ from urllib.parse import quote
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.responses import JSONResponse
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import psutil
 
 from chrome_manager.config import ensure_data_directories, load_settings, write_default_settings
 from chrome_manager.core.chrome_service import ChromeService, ChromeStartError
+from chrome_manager.core.backup_manager import BackupError, BackupManager
+from chrome_manager.core.cdp_monitor import CdpMonitor
 from chrome_manager.core.profile_manager import ProfileError, ProfileManager
 from chrome_manager.core.process_manager import ProcessManager, ProcessStopError
 from chrome_manager.db.database import Database
@@ -30,13 +32,15 @@ PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
 
-def home_redirect(selected: str = "", error: str = "") -> RedirectResponse:
+def home_redirect(selected: str = "", error: str = "", notice: str = "") -> RedirectResponse:
     """Return to the console while retaining the instance the user was operating."""
     query = []
     if selected:
         query.append(f"selected={quote(selected)}")
     if error:
         query.append(f"error={quote(error)}")
+    if notice:
+        query.append(f"notice={quote(notice)}")
     return RedirectResponse(url=f"/?{'&'.join(query)}" if query else "/", status_code=303)
 
 
@@ -74,8 +78,9 @@ def runtime_details(database: Database) -> dict[int, dict[str, object]]:
     """Return the current managed process details used by the local console."""
     with database.read() as connection:
         rows = connection.execute(
-            "SELECT profile_id, pid, started_at FROM runtime_sessions "
-            "WHERE stopped_at IS NULL ORDER BY id ASC"
+            "SELECT r.profile_id, r.pid, r.started_at FROM runtime_sessions r "
+            "JOIN profiles p ON p.id = r.profile_id "
+            "WHERE r.stopped_at IS NULL AND p.status = 'running' AND p.is_deleted = 0 ORDER BY r.id ASC"
         ).fetchall()
     return {
         int(row["profile_id"]): {"pid": row["pid"], "started_at": row["started_at"]}
@@ -130,6 +135,13 @@ class ResourceMonitor:
         self.lock = Lock()
         self.stop_event = Event()
         self.thread: Thread | None = None
+        cutoff = int(time.time()) - 300
+        with self.database.read() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM resource_samples WHERE sampled_at >= ? ORDER BY id DESC LIMIT 30",
+                (cutoff,),
+            ).fetchall()
+        self.history.extend(json.loads(row["payload"]) for row in reversed(rows))
 
     def sample(self) -> dict[str, object]:
         ProcessManager(self.database, 10).reconcile()
@@ -143,6 +155,12 @@ class ResourceMonitor:
                 for profile in profile_list
             },
         }
+        with self.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO resource_samples(sampled_at, payload) VALUES (?, ?)",
+                (snapshot["timestamp"], json.dumps(snapshot, ensure_ascii=False)),
+            )
+            connection.execute("DELETE FROM resource_samples WHERE sampled_at < ?", (snapshot["timestamp"] - 7 * 86400,))
         with self.lock:
             self.history.append(snapshot)
             self.error = None
@@ -152,18 +170,40 @@ class ResourceMonitor:
         with self.lock:
             return list(self.history)
 
+    def alerts(self) -> list[str]:
+        samples = self.samples()
+        alerts = []
+        if not samples or time.time() - samples[-1]["timestamp"] > 30:
+            return alerts
+        memory_window = samples[-18:]
+        cpu_window = samples[-4:]
+        if len(memory_window) == 18 and 150 <= memory_window[-1]["timestamp"] - memory_window[0]["timestamp"] <= 210 \
+                and all(sample["system"]["memory_percent"] >= 90 for sample in memory_window):
+            alerts.append("本机内存连续约 3 分钟达到 90%")
+        if len(cpu_window) == 4 and 20 <= cpu_window[-1]["timestamp"] - cpu_window[0]["timestamp"] <= 50 \
+                and all(sample["system"]["cpu"] >= 95 for sample in cpu_window):
+            alerts.append("本机 CPU 连续约 30 秒达到 95%")
+        return alerts
+
+    def record_error(self) -> None:
+        with self.lock:
+            self.error = '资源采集失败，正在重试；显示的是上次采样数据'
+        logging.getLogger('chrome_manager.monitor').exception(self.error)
+
     def start(self) -> None:
         if self.thread is not None:
             return
-        self.sample()
+        try:
+            self.sample()
+        except Exception:
+            self.record_error()
 
         def collect() -> None:
             while not self.stop_event.wait(10):
                 try:
                     self.sample()
                 except Exception:
-                    self.error = '资源采集失败，正在重试；显示的是上次采样数据'
-                    logging.getLogger('chrome_manager.monitor').exception(self.error)
+                    self.record_error()
 
         self.thread = Thread(target=collect, name="chrome-manager-resource-monitor", daemon=True)
         self.thread.start()
@@ -181,30 +221,28 @@ def create_app(web_port: int = 8765) -> FastAPI:
     write_default_settings(settings)
     database = Database(settings.database_path)
     database.initialize()
+    backups = BackupManager(database, settings.data_root / "profiles", settings.data_root / "backups")
+    backups.recover_interrupted()
     profiles = ProfileManager(database, settings.data_root / "profiles")
     chrome = ChromeService(database, settings, web_port)
     processes = ProcessManager(database, settings.shutdown_timeout)
     resources = ResourceMonitor(database, profiles)
+    cdp_monitor = CdpMonitor(database)
 
     @asynccontextmanager
     async def lifespan(app):
         resources.start()
+        cdp_monitor.start()
         try:
             yield
         finally:
+            cdp_monitor.stop()
             resources.stop()
 
     app = FastAPI(title="Chrome Manager", docs_url=None, redoc_url=None, lifespan=lifespan)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', '[::1]', 'testserver'])
 
     @app.middleware('http')
-    async def protect_local_actions(request: Request, call_next):
-        if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
-            origin = request.headers.get('origin')
-            if origin and origin != f'{request.url.scheme}://{request.headers.get("host")}':
-                return JSONResponse({'detail': '拒绝跨站修改请求'}, status_code=403)
-            if request.headers.get('sec-fetch-site') == 'cross-site':
-                return JSONResponse({'detail': '拒绝跨站修改请求'}, status_code=403)
+    async def log_request_errors(request: Request, call_next):
         try:
             return await call_next(request)
         except Exception:
@@ -220,9 +258,24 @@ def create_app(web_port: int = 8765) -> FastAPI:
 
     @app.get("/api/resources")
     def resource_history() -> dict[str, object]:
-        if not resources.samples():
-            resources.sample()
-        return {"samples": resources.samples(), "warning": resources.error}
+        return {"samples": resources.samples(), "warning": resources.error, "cdp": cdp_monitor.states(),
+                "cdp_warning": cdp_monitor.error(), "alerts": resources.alerts()}
+
+    @app.get("/health")
+    def health() -> JSONResponse:
+        samples = resources.samples()
+        resource_healthy = bool(samples) and not resources.error and time.time() - int(samples[-1]["timestamp"]) <= 30
+        cdp_states = cdp_monitor.states()
+        running = runtime_details(database)
+        failed = [profile_id for profile_id, runtime in running.items()
+                  if (state := cdp_states.get(profile_id)) and state["pid"] == runtime["pid"] and state["state"] == "failed"]
+        checking = [profile_id for profile_id, runtime in running.items()
+                    if (state := cdp_states.get(profile_id)) is None or state["pid"] != runtime["pid"]]
+        alerts = resources.alerts()
+        status = "degraded" if not resource_healthy or failed or cdp_monitor.error() or alerts else "checking" if checking else "ok"
+        return JSONResponse({"status": status, "cdp_failed": failed, "cdp_checking": checking,
+                             "cdp_warning": cdp_monitor.error(), "alerts": alerts},
+                            status_code=503 if status == "degraded" else 200)
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
@@ -230,11 +283,13 @@ def create_app(web_port: int = 8765) -> FastAPI:
         if sort_by not in {"port", "project", "platform", "status"}:
             sort_by = "port"
         profile_list = sort_profiles(profiles.list(), sort_by)
-        if not resources.samples():
-            resources.sample()
         resource_history = resources.samples()
-        latest_resources = resource_history[-1]
+        latest_resources = resource_history[-1] if resource_history else {
+            "system": {"cpu": 0, "memory_used": 0, "memory_total": 0, "memory_percent": 0},
+            "instances": {},
+        }
         active_runtime = runtime_details(database)
+        cdp_states = cdp_monitor.states()
         desktop_profiles = [
             {
                 "id": profile.id,
@@ -247,6 +302,17 @@ def create_app(web_port: int = 8765) -> FastAPI:
                 "cpu": latest_resources["instances"].get(str(profile.id), {}).get("cpu", 0),
                 "memory": latest_resources["instances"].get(str(profile.id), {}).get("memory", 0),
                 **active_runtime.get(profile.id, {"pid": None, "started_at": None}),
+                "cdp_health": (
+                    cdp_states[profile.id]["state"]
+                    if profile.id in cdp_states and cdp_states[profile.id]["pid"] == active_runtime.get(profile.id, {}).get("pid")
+                    else "checking" if profile.status == "running" else "stopped"
+                ),
+                "cdp_reason": (
+                    cdp_states[profile.id].get("reason", "")
+                    if profile.id in cdp_states and cdp_states[profile.id]["pid"] == active_runtime.get(profile.id, {}).get("pid")
+                    else ""
+                ),
+                "backups": backups.list(profile) if profile.status == "stopped" else [],
             }
             for profile in profile_list
         ]
@@ -333,6 +399,24 @@ def create_app(web_port: int = 8765) -> FastAPI:
         except ProfileError as exc:
             return error_redirect(str(exc), selected or name)
         return home_redirect(selected)
+
+    @app.post("/profiles/{name}/backup")
+    def backup_profile(name: str) -> RedirectResponse:
+        try:
+            backup_id = backups.backup(profiles.show(name))
+        except (ProfileError, BackupError) as exc:
+            return error_redirect(str(exc), name)
+        return home_redirect(name, notice=f"备份完成：{backup_id}")
+
+    @app.post("/profiles/{name}/restore")
+    def restore_profile(name: str, backup_id: str = Form(""), confirmed: bool = Form(False)) -> RedirectResponse:
+        try:
+            if not confirmed:
+                raise BackupError("请确认恢复操作后重试")
+            previous_id = backups.restore(profiles.show(name), backup_id)
+        except (ProfileError, BackupError) as exc:
+            return error_redirect(str(exc), name)
+        return home_redirect(name, notice=f"恢复完成；恢复前数据已备份为 {previous_id}")
 
     @app.post("/profiles/{name}/stop")
     def stop_profile(name: str, selected: str = "") -> RedirectResponse:

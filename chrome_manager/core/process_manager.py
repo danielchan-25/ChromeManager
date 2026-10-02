@@ -66,7 +66,9 @@ class ProcessManager:
             except psutil.TimeoutExpired:
                 logging.getLogger('chrome_manager.lifecycle').warning('实例 %s 未在超时内退出，将强制结束', profile.id)
                 process.kill()
-                process.wait(timeout=3)
+                # Windows may acknowledge TerminateProcess before wait handles are
+                # signaled, particularly when Chrome still has renderer children.
+                process.wait(timeout=max(10, self.shutdown_timeout))
         except psutil.NoSuchProcess:
             pass  # It was manually closed; safely reconcile the stale record.
         except psutil.AccessDenied as exc:

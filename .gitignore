@@ -35,6 +35,7 @@ desktop.ini
 *.local.json
 
 # Chrome Manager runtime data: profiles, databases, logs and local smoke tests
+.data/
 .phase1-smoke/
 data/
 profiles/

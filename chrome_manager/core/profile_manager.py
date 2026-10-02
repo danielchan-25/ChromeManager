@@ -21,8 +21,8 @@ class ProfileError(ValueError):
 class ProfileManager:
     def __init__(self, database: Database, profiles_root: Path) -> None:
         self.database = database
-        self.profiles_root = profiles_root
-        self.repository = ProfileRepository()
+        self.profiles_root = profiles_root.resolve()
+        self.repository = ProfileRepository(self.profiles_root.parent)
 
     def create(
         self,
@@ -63,7 +63,7 @@ class ProfileManager:
                 else:
                     user_data_dir.mkdir(parents=True, exist_ok=False)
                     profile = self.repository.create(
-                        connection, name=name, user_data_dir=str(user_data_dir), project_name=project_name,
+                        connection, name=name, user_data_dir=f"profiles/{name}/User Data", project_name=project_name,
                         platform=platform, account_name=account_name, description=description, tags=tags,
                         cdp_port=assigned_port, default_url=normalized_url, proxy=proxy,
                     )

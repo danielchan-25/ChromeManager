@@ -29,7 +29,7 @@ class Database:
             raise DatabaseError(f"Unable to open database: {self.path}") from exc
 
     def initialize(self) -> None:
-        from chrome_manager.db.migrations import v001, v002, v003
+        from chrome_manager.db.migrations import v001, v002, v003, v004, v005
 
         connection = self.connect()
         try:
@@ -47,7 +47,13 @@ class Database:
             if version is not None and version["version"] == v002.VERSION:
                 v003.apply(connection)
                 version = connection.execute("SELECT version FROM schema_version").fetchone()
-            if version is None or version["version"] != v003.VERSION:
+            if version is not None and version["version"] == v003.VERSION:
+                v004.apply(connection)
+                version = connection.execute("SELECT version FROM schema_version").fetchone()
+            if version is not None and version["version"] == v004.VERSION:
+                v005.apply(connection)
+                version = connection.execute("SELECT version FROM schema_version").fetchone()
+            if version is None or version["version"] != v005.VERSION:
                 raise DatabaseError("Unsupported database schema version")
             connection.commit()
         finally:

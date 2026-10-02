@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DATA_ROOT = Path("D:/ChromeManager")
+DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[1] / ".data"
 ENV_DATA_ROOT = "CHROME_MANAGER_DATA_ROOT"
 
 
@@ -16,7 +16,7 @@ ENV_DATA_ROOT = "CHROME_MANAGER_DATA_ROOT"
 class Settings:
     data_root: Path
     chrome_path: str = ""
-    bind_address: str = "127.0.0.1"
+    bind_address: str = "0.0.0.0"
     auto_port_start: int = 9500
     auto_port_end: int = 9999
     startup_timeout: int = 15
@@ -59,12 +59,21 @@ def load_settings(data_root: Path | None = None) -> Settings:
     logging = raw.get("logging", {})
     configured_root = data.get("root")
     if configured_root and not env_root and data_root is None:
-        root = Path(configured_root).expanduser().resolve()
+        configured_path = Path(configured_root).expanduser()
+        if configured_path.is_absolute():
+            # Older generated settings stored the original machine's .data path.
+            # Ignore only that legacy default; explicit external roots belong in the env override.
+            if configured_path.name.lower() != ".data":
+                from chrome_manager.exceptions import ConfigurationError
+
+                raise ConfigurationError("请用 CHROME_MANAGER_DATA_ROOT 指定外部数据目录，不要在配置中写绝对路径")
+        else:
+            root = (DEFAULT_DATA_ROOT.parent / configured_path).resolve()
 
     return Settings(
         data_root=root,
         chrome_path=str(browser.get("chrome_path", "")),
-        bind_address=str(cdp.get("bind_address", "127.0.0.1")),
+        bind_address=str(cdp.get("bind_address", "0.0.0.0")),
         auto_port_start=int(cdp.get("auto_port_start", 9500)),
         auto_port_end=int(cdp.get("auto_port_end", 9999)),
         startup_timeout=int(cdp.get("startup_timeout", 15)),
@@ -93,10 +102,10 @@ def write_default_settings(settings: Settings) -> Path:
     if path.exists():
         return path
     path.write_text(
-        "[data]\n"
-        f'root = "{settings.data_root.as_posix()}"\n\n'
         "[browser]\nchrome_path = \"\"\n\n"
-        "[cdp]\nbind_address = \"127.0.0.1\"\nauto_port_start = 9500\nauto_port_end = 9999\nstartup_timeout = 15\n\n"
+        "[cdp]\n"
+        "# 管理控制台的监听地址；0.0.0.0 允许局域网访问，127.0.0.1 仅本机\n"
+        "bind_address = \"0.0.0.0\"\nauto_port_start = 9500\nauto_port_end = 9999\nstartup_timeout = 15\n\n"
         "[process]\nshutdown_timeout = 10\n\n"
         "[logging]\nmax_size_mb = 10\nbackup_count = 10\n",
         encoding="utf-8",

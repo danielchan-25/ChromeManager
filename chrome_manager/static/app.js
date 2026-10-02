@@ -14,11 +14,10 @@ if (savedScroll !== null) {
   }, { once: true });
 }
 
-const transientError = document.querySelector(".win98-error");
-if (transientError) {
-  window.setTimeout(() => transientError.classList.add("is-hiding"), 4500);
-  window.setTimeout(() => transientError.remove(), 5000);
-}
+document.querySelectorAll(".win98-error, .win98-notice").forEach((message) => {
+  window.setTimeout(() => message.classList.add("is-hiding"), 4500);
+  window.setTimeout(() => message.remove(), 5000);
+});
 
 const newProfilePanel = document.getElementById("new-profile");
 
@@ -105,6 +104,8 @@ function drawInstanceChart(canvas, metric, legendId) {
     id, name, color: chartColors[index % chartColors.length],
     values: resourceSamples.map((sample) => sample.instances?.[id]?.[metric] || 0),
   }));
+  const legend = document.getElementById(legendId);
+  if (legend) legend.replaceChildren();
   if (!series.length) {
     context.fillText("等待资源采样…", left, top + 28);
     return;
@@ -121,8 +122,13 @@ function drawInstanceChart(canvas, metric, legendId) {
   });
   context.fillStyle = text;
   context.fillText(metric === "cpu" ? "100%" : `${maximum.toFixed(0)} MB`, width - right + 3, top + 4);
-  const legend = document.getElementById(legendId);
-  if (legend) legend.innerHTML = series.map((item) => `<span><i style="background:${item.color}"></i>${item.name}</span>`).join("");
+  if (legend) series.forEach((item) => {
+    const entry = document.createElement("span");
+    const swatch = document.createElement("i");
+    swatch.style.background = item.color;
+    entry.append(swatch, document.createTextNode(item.name));
+    legend.append(entry);
+  });
 }
 
 function renderResourceCharts() {
@@ -175,7 +181,7 @@ const selectedProfileId = document.body.dataset.selectedProfileId;
 let selectedDesktopProfile = desktopProfiles.find((profile) => String(profile.id) === selectedProfileId) || desktopProfiles[0] || null;
 
 const detail = (id) => document.getElementById(id);
-const statusLabels = { running: "运行中", stopped: "已停止", starting: "启动中", stopping: "停止中", failed: "启动失败" };
+const statusLabels = { running: "运行中", stopped: "已停止", starting: "启动中", stopping: "停止中", failed: "启动失败", maintenance: "数据维护中" };
 
 function actionPath(profile, action) {
   const path = `/profiles/${encodeURIComponent(profile.name)}/${action}`;
@@ -252,6 +258,15 @@ function renderDesktopDetails() {
   detail("detail-title").textContent = profile.display_name;
   detail("detail-status").textContent = statusLabels[profile.status] || profile.status;
   detail("detail-lamp").className = `status-lamp ${["running", "starting"].includes(profile.status) ? "running" : profile.status === "failed" ? "failed" : "stopped"}`;
+  const cdpIndicator = detail("detail-cdp");
+  cdpIndicator.hidden = profile.status !== "running";
+  cdpIndicator.textContent = profile.cdp_health === "failed" ? "CDP 连接失败" : profile.cdp_health === "ok" ? "CDP 正常" : "CDP 检测中";
+  cdpIndicator.classList.toggle("failed", profile.cdp_health === "failed");
+  const cdpReason = detail("detail-cdp-reason");
+  if (cdpReason) {
+    cdpReason.hidden = profile.status !== "running" || profile.cdp_health !== "failed";
+    cdpReason.textContent = profile.cdp_reason || "";
+  }
   detail("detail-cpu").textContent = `${profile.cpu || 0}%`;
   detail("detail-memory").textContent = `${profile.memory || 0} MB`;
   detail("detail-pid").textContent = profile.pid || "—";
@@ -264,12 +279,24 @@ function renderDesktopDetails() {
   detail("stop-form").action = actionPath(profile, "stop");
   detail("start-form").action = actionPath(profile, "start");
   detail("delete-form").action = actionPath(profile, "delete");
+  detail("backup-form").action = actionPath(profile, "backup");
+  detail("restore-form").action = actionPath(profile, "restore");
   detail("edit-link").href = actionPath(profile, "edit");
   const running = profile.status === "running";
   detail("focus-form").hidden = !running; detail("restart-form").hidden = !running; detail("stop-form").hidden = !running;
   const stopped = profile.status === "stopped";
   detail("start-form").hidden = !stopped;
-  detail("edit-link").hidden = !stopped; detail("delete-form").hidden = !stopped;
+  detail("edit-link").hidden = !stopped; detail("delete-form").hidden = !stopped; detail("backup-form").hidden = !stopped;
+  const restoreForm = detail("restore-form");
+  restoreForm.hidden = !stopped || !profile.backups?.length;
+  const backupSelect = detail("restore-backup-select");
+  backupSelect.replaceChildren(...(profile.backups || []).map((backup) => {
+    const option = document.createElement("option");
+    option.value = backup.id;
+    option.textContent = `${backup.created_at}${backup.kind === "pre-restore" ? "（恢复前）" : ""}`;
+    return option;
+  }));
+  restoreForm.querySelector('[name="confirmed"]').checked = false;
   document.querySelectorAll(".win98-list-item").forEach((item) => {
     const selected = String(profile.id) === item.dataset.profileId;
     item.classList.toggle("selected", selected); item.setAttribute("aria-selected", String(selected));
@@ -304,7 +331,6 @@ if (desktopProfilesNode) {
       if (!response.ok) throw new Error("resource refresh failed");
       const payload = await response.json();
       desktopSamples = payload.samples || [];
-      if (health) health.textContent = payload.warning || "";
       const latest = desktopSamples.at(-1);
       if (latest?.system) {
         detail("desktop-cpu-summary").textContent = `${latest.system.cpu}%`;
@@ -313,9 +339,19 @@ if (desktopProfilesNode) {
       desktopProfiles.forEach(profile => {
         const instance = latest?.instances?.[String(profile.id)];
         if (instance) Object.assign(profile, {cpu: instance.cpu, memory: instance.memory, status: instance.status || profile.status});
+        const cdp = payload.cdp?.[String(profile.id)];
+        profile.cdp_health = profile.status !== "running" ? "stopped" : cdp?.pid === profile.pid ? cdp.state : "checking";
+        profile.cdp_reason = profile.status === "running" && cdp?.pid === profile.pid ? cdp.reason || "" : "";
         const lamp = document.querySelector(`[data-profile-id="${profile.id}"] .status-lamp`);
         if (lamp) lamp.className = `status-lamp ${["running", "starting"].includes(profile.status) ? "running" : "stopped"}`;
+        const cdpAlert = document.querySelector(`[data-profile-id="${profile.id}"] .cdp-alert`);
+        if (cdpAlert) {
+          cdpAlert.hidden = profile.cdp_health !== "failed";
+          cdpAlert.title = profile.cdp_reason || "CDP 连接失败";
+        }
       });
+      const failedCount = desktopProfiles.filter(profile => profile.status === "running" && profile.cdp_health === "failed").length;
+      if (health) health.textContent = [payload.warning, payload.cdp_warning, ...(payload.alerts || []), failedCount ? `${failedCount} 个实例的 CDP 连接失败` : ""].filter(Boolean).join("；");
       renderDesktopDetails();
     } catch {
       if (health) health.textContent = "无法连接管理服务，数据未更新；正在重试";

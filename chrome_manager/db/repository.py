@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +26,9 @@ class Profile:
 
 
 class ProfileRepository:
+    def __init__(self, data_root: Path) -> None:
+        self.data_root = data_root
+
     def list_active(self, connection: sqlite3.Connection) -> list[Profile]:
         rows = connection.execute(
             """
@@ -158,12 +162,13 @@ class ProfileRepository:
         )
         connection.execute("UPDATE profiles SET proxy_id = ? WHERE id = ?", (cursor.lastrowid, profile_id))
 
-    @staticmethod
-    def _to_profile(row: sqlite3.Row) -> Profile:
+    def _to_profile(self, row: sqlite3.Row) -> Profile:
+        stored_dir = Path(row["user_data_dir"])
+        user_data_dir = stored_dir if stored_dir.is_absolute() else self.data_root / stored_dir
         return Profile(
             id=row["id"], name=row["name"], project_name=row["project_name"], platform=row["platform"],
             account_name=row["account_name"], description=row["description"], tags=row["tags"],
-            user_data_dir=row["user_data_dir"], chrome_path=row["chrome_path"], status=row["status"],
+            user_data_dir=str(user_data_dir), chrome_path=row["chrome_path"], status=row["status"],
             cdp_port=row["cdp_port"], is_deleted=bool(row["is_deleted"]), default_url=row["default_url"],
             proxy_url=row["proxy_url"],
         )
