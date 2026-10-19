@@ -6,16 +6,17 @@
 {% set display_name = (profile.project_name or '未命名项目') ~ ' + ' ~ (profile.platform or '未指定平台') %}
 <title>{{ display_name }} · ChromeManager</title>
 <link rel="stylesheet" href="/static/app.css?v=20260922-starting-state-b">
-<script src="/static/app.js?v=20260922-starting-state-b" defer></script>
+<script src="/static/app.js?v=20261019-state-sync" defer></script>
 </head>
 <body class="win98-page">
 {% set status_text = {'running': '运行中', 'stopped': '已停止', 'starting': '启动中', 'stopping': '停止中', 'failed': '启动失败'}.get(profile.status, profile.status) %}
-<main class="win98-console win98-subwindow profile-info-view" aria-label="Profile 信息">
+<main class="win98-console win98-subwindow profile-info-view" data-profile-id="{{ profile.id }}" aria-label="Profile 信息">
   <header class="win98-titlebar"><div class="win98-app-title"><span class="pixel-app-icon" aria-hidden="true"></span>ChromeManager · Profile 信息</div><div class="win98-title-actions"><button class="window-control" type="button" title="最小化">_</button><button class="window-control" type="button" title="最大化">□</button><button class="window-control close" type="button" title="关闭">×</button></div></header>
   <section class="win98-page-content">
     <div class="win98-pane-caption">{{ display_name }}</div>
     <p class="detail-status"><span class="status-lamp {{ 'running' if profile.status in ['running', 'starting'] else ('failed' if profile.status == 'failed' else 'stopped') }}"></span><strong>{{ status_text }}</strong></p>
     <div class="win98-rule"></div>
+    <p id="profile-refresh-warning" role="status"></p>
     <section class="win98-readonly-panel">
       <div class="win98-subcaption">配置说明</div>
       <p>{{ profile.description or '暂无描述' }}</p>

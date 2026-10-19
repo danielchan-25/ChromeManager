@@ -10,6 +10,7 @@ from pathlib import Path
 from chrome_manager.core.chrome_service import is_port_available
 from chrome_manager.db.database import Database
 from chrome_manager.db.repository import Profile, ProfileRepository
+from chrome_manager.utils.audit import profile_operation
 
 _INVALID_PROFILE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -24,6 +25,7 @@ class ProfileManager:
         self.profiles_root = profiles_root.resolve()
         self.repository = ProfileRepository(self.profiles_root.parent)
 
+    @profile_operation('profile.create')
     def create(
         self,
         name: str,
@@ -99,6 +101,7 @@ class ProfileManager:
             raise ProfileError(f"未找到 Profile「{name}」")
         return profile
 
+    @profile_operation('profile.update')
     def update(
         self, name: str, *, project_name: str | None, platform: str | None, account_name: str | None,
         description: str | None, default_url: str | None, proxy_url: str | None,
@@ -121,6 +124,7 @@ class ProfileManager:
             )
             return updated
 
+    @profile_operation('profile.delete')
     def delete(self, name: str) -> None:
         with self.database.transaction() as connection:
             profile = self.repository.get_by_name(connection, name)

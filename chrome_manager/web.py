@@ -31,6 +31,8 @@ from chrome_manager.core.profile_manager import ProfileError, ProfileManager
 from chrome_manager.core.process_manager import ProcessManager, ProcessStopError
 from chrome_manager.db.database import Database
 from chrome_manager.utils.logger import configure_logging
+from chrome_manager.utils.audit import event, operation, step
+from uuid import uuid4
 
 PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
@@ -177,7 +179,13 @@ class ResourceMonitor:
         self.history.extend(json.loads(row["payload"]) for row in reversed(rows))
 
     def sample(self) -> dict[str, object]:
-        ProcessManager(self.database, 10).reconcile()
+        with operation('resources.sample', level=logging.DEBUG):
+            return self._sample()
+
+    def _sample(self) -> dict[str, object]:
+        processes = ProcessManager(self.database, 10)
+        processes.reconcile()
+        processes.recover_restarted(self.profiles.list())
         profile_list = self.profiles.list()
         system, usage = resource_snapshot(self.database)
         snapshot = {
@@ -252,11 +260,17 @@ def create_app(web_port: int = 8765) -> FastAPI:
     settings = load_settings()
     ensure_data_directories(settings)
     configure_logging(settings.data_root / 'logs', settings.log_max_size_mb, settings.log_backup_count)
-    write_default_settings(settings)
+    event('manager.initialize', level=logging.INFO, version=deployment_version,
+          data_root=str(settings.data_root), web_port=web_port, bind_address=settings.bind_address,
+          startup_timeout=settings.startup_timeout, shutdown_timeout=settings.shutdown_timeout)
+    with step('manager.prepare_settings'):
+        write_default_settings(settings)
     database = Database(settings.database_path)
-    database.initialize()
+    with step('manager.initialize_database', database_path=str(settings.database_path)):
+        database.initialize()
     backups = BackupManager(database, settings.data_root / "profiles", settings.data_root / "backups")
-    backups.recover_interrupted()
+    with step('manager.recover_interrupted_backups'):
+        backups.recover_interrupted()
     profiles = ProfileManager(database, settings.data_root / "profiles")
     chrome = ChromeService(database, settings, web_port)
     processes = ProcessManager(database, settings.shutdown_timeout)
@@ -265,23 +279,39 @@ def create_app(web_port: int = 8765) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app):
-        resources.start()
-        cdp_monitor.start()
+        with operation('manager.start_monitors'):
+            with step('manager.start_resources'):
+                resources.start()
+            with step('manager.start_cdp_monitor'):
+                cdp_monitor.start()
         try:
             yield
         finally:
-            cdp_monitor.stop()
-            resources.stop()
+            with operation('manager.stop_monitors'):
+                with step('manager.stop_cdp_monitor'):
+                    cdp_monitor.stop()
+                with step('manager.stop_resources'):
+                    resources.stop()
 
     app = FastAPI(title="Chrome Manager", version=__version__, docs_url=None, redoc_url=None, lifespan=lifespan)
 
     @app.middleware('http')
     async def log_request_errors(request: Request, call_next):
-        try:
-            return await call_next(request)
-        except Exception:
-            logging.getLogger('chrome_manager.web').exception('请求失败：%s %s', request.method, request.url.path)
-            return JSONResponse({'detail': '管理服务发生异常，请查看 logs/error.log 后重试'}, status_code=500)
+        request_id = uuid4().hex
+        # Do not persist form bodies, query strings, cookies, or authorization headers.
+        with operation('http.request', level=logging.DEBUG, request_id=request_id,
+                       method=request.method, path=request.url.path,
+                       client=request.client.host if request.client else None) as result:
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                event('http.request.error', level=logging.ERROR, exc_info=True,
+                      error_type=type(exc).__name__, error=str(exc))
+                response = JSONResponse({'detail': '管理服务发生异常，请查看 logs/error.log 后重试',
+                                         'request_id': request_id}, status_code=500)
+            result['status_code'] = response.status_code
+            response.headers['X-Request-ID'] = request_id
+            return response
 
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
 
@@ -297,7 +327,29 @@ def create_app(web_port: int = 8765) -> FastAPI:
     @app.get("/api/resources")
     def resource_history() -> dict[str, object]:
         return {"samples": resources.samples(), "warning": resources.error, "cdp": cdp_monitor.states(),
+                "runtime": runtime_details(database),
                 "cdp_warning": cdp_monitor.error(), "alerts": resources.alerts()}
+
+    @app.get('/api/cdp/{port}/health')
+    def cdp_health(port: int) -> JSONResponse:
+        profile = next((p for p in profiles.list() if p.cdp_port == port), None)
+        if profile is None:
+            raise HTTPException(status_code=404, detail='未找到受管 CDP 端口')
+        runtime = runtime_details(database).get(profile.id)
+        state = cdp_monitor.states().get(profile.id)
+        result = {'port': port, 'profile_id': profile.id, 'ready': False,
+                  'state': profile.status, 'failed_pages': []}
+        if profile.status != 'running' or runtime is None:
+            return JSONResponse(result, status_code=503, headers={'Cache-Control': 'no-store'})
+        if state is None or state['pid'] != runtime['pid']:
+            result['state'] = 'checking'
+        else:
+            result.update(state)
+            result['ready'] = state['state'] == 'ok' and cdp_monitor.error() is None
+        if cdp_monitor.error():
+            result['monitor_error'] = cdp_monitor.error()
+        return JSONResponse(result, status_code=200 if result['ready'] else 503,
+                            headers={'Cache-Control': 'no-store'})
 
     @app.get("/health")
     def health() -> JSONResponse:
@@ -459,7 +511,8 @@ def create_app(web_port: int = 8765) -> FastAPI:
     @app.post("/profiles/{name}/stop")
     def stop_profile(name: str, selected: str = "") -> RedirectResponse:
         try:
-            processes.stop_profile(profiles.show(name))
+            profile = profiles.show(name)
+            processes.stop_profile(profile)
         except (ProfileError, ProcessStopError) as exc:
             return error_redirect(str(exc), selected or name)
         return home_redirect(selected or name)
@@ -475,11 +528,13 @@ def create_app(web_port: int = 8765) -> FastAPI:
     @app.post("/profiles/{name}/restart")
     def restart_profile(name: str, selected: str = "") -> RedirectResponse:
         try:
-            profile = profiles.show(name)
-            if profile.status == "running":
-                processes.stop_profile(profile)
+            with operation('browser.restart', profile_name=name) as result:
                 profile = profiles.show(name)
-            chrome.start(profile)
+                result.update(profile_id=profile.id, port=profile.cdp_port)
+                if profile.status == "running":
+                    processes.stop_profile(profile)
+                    profile = profiles.show(name)
+                result['browser_pid'] = chrome.start(profile)
         except (ProfileError, ChromeStartError, ProcessStopError) as exc:
             return error_redirect(str(exc), selected or name)
         return home_redirect(selected or name)

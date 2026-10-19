@@ -14,6 +14,7 @@ import psutil
 
 from chrome_manager.db.database import Database
 from chrome_manager.db.repository import Profile
+from chrome_manager.utils.audit import profile_operation, step
 
 _BACKUP_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{8}\Z")
 
@@ -93,6 +94,7 @@ class BackupManager:
             "created_at": datetime.now().isoformat(timespec="seconds"), "kind": kind,
         }, ensure_ascii=False), encoding="utf-8")
 
+    @profile_operation('backup.create')
     def backup(self, profile: Profile) -> str:
         source = self._source(profile)
         self._claim(profile)
@@ -106,9 +108,11 @@ class BackupManager:
             backup_id = self._new_id()
             stage = root / f".{backup_id}.tmp"
             self._write_manifest(stage, profile, "manual")
-            shutil.copytree(source, stage / "data", symlinks=True)
+            with step('backup.copy_data', source=str(source), destination=str(stage / 'data')):
+                shutil.copytree(source, stage / "data", symlinks=True)
             self._assert_not_running(source)
-            stage.rename(root / backup_id)
+            with step('backup.commit', backup_id=backup_id):
+                stage.rename(root / backup_id)
             logging.getLogger("chrome_manager.backup").info("实例 %s 已备份：%s", profile.id, backup_id)
             return backup_id
         except (OSError, shutil.Error) as exc:
@@ -120,6 +124,7 @@ class BackupManager:
             finally:
                 self._release(profile)
 
+    @profile_operation('backup.restore')
     def restore(self, profile: Profile, backup_id: str) -> str:
         if not _BACKUP_ID.fullmatch(backup_id) or backup_id not in {item["id"] for item in self.list(profile)}:
             raise BackupError("所选备份不存在或不属于此实例")
@@ -132,15 +137,19 @@ class BackupManager:
             if not source.is_dir():
                 raise BackupError("当前 Profile 数据目录不存在")
             backup_data = self._backup_root(profile) / backup_id / "data"
-            shutil.copytree(backup_data, stage, symlinks=True)
+            with step('backup.restore.copy', backup_id=backup_id):
+                shutil.copytree(backup_data, stage, symlinks=True)
             self._assert_not_running(source)
             previous = self._backup_root(profile) / self._new_id()
             self._write_manifest(previous, profile, "pre-restore")
-            source.rename(previous / "data")
+            with step('backup.restore.preserve_current', backup_id=previous.name):
+                source.rename(previous / "data")
             try:
-                stage.rename(source)
+                with step('backup.restore.commit', backup_id=backup_id):
+                    stage.rename(source)
             except OSError:
-                (previous / "data").rename(source)
+                with step('backup.restore.rollback', backup_id=previous.name):
+                    (previous / "data").rename(source)
                 raise
             logging.getLogger("chrome_manager.backup").info(
                 "实例 %s 已恢复备份 %s；恢复前数据保留在 %s", profile.id, backup_id, previous.name

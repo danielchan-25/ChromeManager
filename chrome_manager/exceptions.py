@@ -8,6 +8,7 @@ class ExitCode(IntEnum):
     GENERAL_ERROR = 1
     DATABASE_ERROR = 7
     INVALID_CONFIGURATION = 10
+    ALREADY_RUNNING = 20
 
 
 class ChromeManagerError(Exception):

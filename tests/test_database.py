@@ -10,7 +10,8 @@ def test_initialization_creates_current_schema_and_wal(tmp_path: Path) -> None:
     with database.connect() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"profiles", "cdp_ports", "proxies", "runtime_sessions", "events", "settings", "schema_version", "resource_samples"} <= tables
-        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+        assert not {'cdp_alert_incidents', 'notification_outbox'} & tables
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
@@ -24,7 +25,7 @@ def test_existing_v3_database_upgrades_without_losing_profiles(tmp_path: Path) -
         connection.execute("INSERT INTO profiles(name, user_data_dir) VALUES ('existing', 'existing-data')")
     database.initialize()
     with database.read() as connection:
-        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         assert connection.execute("SELECT name FROM profiles").fetchone()[0] == "existing"
 
 

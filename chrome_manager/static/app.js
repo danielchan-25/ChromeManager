@@ -339,6 +339,9 @@ if (desktopProfilesNode) {
       desktopProfiles.forEach(profile => {
         const instance = latest?.instances?.[String(profile.id)];
         if (instance) Object.assign(profile, {cpu: instance.cpu, memory: instance.memory, status: instance.status || profile.status});
+        const runtime = payload.runtime?.[String(profile.id)];
+        if (runtime) Object.assign(profile, runtime);
+        else if (payload.runtime) Object.assign(profile, {pid: null, started_at: null});
         const cdp = payload.cdp?.[String(profile.id)];
         profile.cdp_health = profile.status !== "running" ? "stopped" : cdp?.pid === profile.pid ? cdp.state : "checking";
         profile.cdp_reason = profile.status === "running" && cdp?.pid === profile.pid ? cdp.reason || "" : "";
@@ -397,3 +400,27 @@ document.querySelectorAll("[data-proxy-toggle]").forEach((toggle) => {
   toggle.addEventListener("change", syncProxyField);
   syncProxyField();
 });
+
+// The browser opens this page before startup finishes; keep its status live.
+const infoView = document.querySelector('.profile-info-view[data-profile-id]');
+if (infoView) {
+  const refreshInfo = async () => {
+    const warning = document.getElementById('profile-refresh-warning');
+    try {
+      const response = await fetch('/api/resources', {cache: 'no-store', signal: AbortSignal.timeout(8000)});
+      if (!response.ok) throw new Error('Status unavailable');
+      const payload = await response.json();
+      const sample = payload.samples?.at(-1);
+      const instance = sample?.instances?.[infoView.dataset.profileId];
+      if (!instance || Date.now() / 1000 - sample.timestamp > 30) throw new Error('Stale status');
+      infoView.querySelector('.detail-status strong').textContent = statusLabels[instance.status] || instance.status;
+      infoView.querySelector('.status-lamp').className = `status-lamp ${['running', 'starting'].includes(instance.status) ? 'running' : instance.status === 'failed' ? 'failed' : 'stopped'}`;
+      warning.textContent = payload.warning || '';
+    } catch {
+      warning.textContent = '状态未更新：无法获取最新状态，正在重试';
+    } finally {
+      window.setTimeout(refreshInfo, 5000);
+    }
+  };
+  refreshInfo();
+}

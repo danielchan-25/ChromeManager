@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, Mock
 import psutil
 import websocket
 from fastapi.testclient import TestClient
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from chrome_manager.core.cdp_monitor import CdpMonitor
 from chrome_manager.core.profile_manager import ProfileManager
@@ -14,30 +13,65 @@ from chrome_manager.db.database import Database
 from chrome_manager.web import create_app
 
 
-def test_probe_reports_real_playwright_timeout(tmp_path, monkeypatch):
-    class UnresponsiveBrowser:
-        async def connect_over_cdp(self, _url, *, timeout):
-            assert 0 < timeout <= 250
-            raise PlaywrightTimeoutError("timed out")
-
+def test_probe_reports_browser_timeout(tmp_path, monkeypatch):
     monitor = CdpMonitor(Database(tmp_path / "test.db"), timeout_ms=250)
     monkeypatch.setattr(monitor, "_probe_pages", AsyncMock(return_value=[]))
-    profile_id, result = asyncio.run(monitor._check(UnresponsiveBrowser(), 7, 9510, 1234))
+    monkeypatch.setattr('chrome_manager.core.cdp_monitor.probe_browser', Mock(side_effect=TimeoutError()))
+    profile_id, result = asyncio.run(monitor._check(7, 9510, 1234))
     assert profile_id == 7
     assert result["state"] == "failed"
-    assert result["reason"] == "Playwright 连接超时"
+    assert result["reason"] == "CDP 健康检查超时"
 
 
-def test_stuck_page_is_identified_before_playwright_initialization(tmp_path, monkeypatch):
+def test_stuck_page_is_identified_without_playwright_attachment(tmp_path, monkeypatch):
     monitor = CdpMonitor(Database(tmp_path / "test.db"))
     stuck = {"id": "docs", "url": "http://127.0.0.1:8000/docs", "reason": "页面 CDP 响应超时"}
     monkeypatch.setattr(monitor, "_probe_pages", AsyncMock(return_value=[stuck]))
-    browser_type = Mock()
-    _, result = asyncio.run(monitor._check(browser_type, 5, 9510, 1234))
+    probe = Mock()
+    monkeypatch.setattr('chrome_manager.core.cdp_monitor.probe_browser', probe)
+    _, result = asyncio.run(monitor._check(5, 9510, 1234))
     assert result["state"] == "failed"
     assert result["failed_pages"] == [stuck]
     assert "http://127.0.0.1:8000/docs" in result["reason"]
-    browser_type.connect_over_cdp.assert_not_called()
+    probe.assert_called_once_with(9510, 2, 1234)
+
+
+def test_transient_browser_timeout_is_rechecked_before_reporting_failure(tmp_path, monkeypatch):
+    monitor = CdpMonitor(Database(tmp_path / 'test.db'))
+    pages = AsyncMock(return_value=[])
+    monkeypatch.setattr(monitor, '_probe_pages', pages)
+    probe = Mock(side_effect=[TimeoutError('PID response was delayed'), {}])
+    monkeypatch.setattr('chrome_manager.core.cdp_monitor.probe_browser', probe)
+    _, result = asyncio.run(monitor._check(4, 9600, 1234))
+    assert result['state'] == 'ok'
+    assert probe.call_count == 2
+    assert probe.call_args_list[0].args == (9600, 2, 1234)
+    assert probe.call_args_list[1].args == (9600, 4, 1234)
+    pages.assert_awaited_once()
+
+
+def test_persistent_timeout_remains_failed_after_bounded_retry(tmp_path, monkeypatch):
+    monitor = CdpMonitor(Database(tmp_path / 'test.db'))
+    pages = AsyncMock(return_value=[])
+    monkeypatch.setattr(monitor, '_probe_pages', pages)
+    probe = Mock(side_effect=TimeoutError('still unavailable'))
+    monkeypatch.setattr('chrome_manager.core.cdp_monitor.probe_browser', probe)
+    _, result = asyncio.run(monitor._check(4, 9600, 1234))
+    assert result['state'] == 'failed'
+    assert probe.call_count == 2
+    pages.assert_not_awaited()
+
+
+def test_pid_mismatch_is_not_hidden_by_timeout_retry(tmp_path, monkeypatch):
+    monitor = CdpMonitor(Database(tmp_path / 'test.db'))
+    pages = AsyncMock(return_value=[])
+    monkeypatch.setattr(monitor, '_probe_pages', pages)
+    probe = Mock(side_effect=ValueError('CDP port belongs to a different browser process'))
+    monkeypatch.setattr('chrome_manager.core.cdp_monitor.probe_browser', probe)
+    _, result = asyncio.run(monitor._check(4, 9600, 1234))
+    assert result['state'] == 'failed'
+    probe.assert_called_once()
+    pages.assert_not_awaited()
 
 
 def test_page_socket_without_command_responses_is_not_healthy(monkeypatch):

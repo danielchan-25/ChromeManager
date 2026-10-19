@@ -23,7 +23,6 @@ class Settings:
     shutdown_timeout: int = 10
     log_max_size_mb: int = 10
     log_backup_count: int = 10
-
     @property
     def config_path(self) -> Path:
         return self.data_root / "config" / "settings.toml"
@@ -108,6 +107,7 @@ def write_default_settings(settings: Settings) -> Path:
         "bind_address = \"0.0.0.0\"\nauto_port_start = 9500\nauto_port_end = 9999\nstartup_timeout = 15\n\n"
         "[process]\nshutdown_timeout = 10\n\n"
         "[logging]\nmax_size_mb = 10\nbackup_count = 10\n",
+
         encoding="utf-8",
     )
     return path

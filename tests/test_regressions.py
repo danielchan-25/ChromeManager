@@ -62,6 +62,9 @@ def test_custom_web_port_and_direct_proxy(profiles, tmp_path, monkeypatch):
         service.start(profile)
     args = launch.call_args.args[0]
     assert '--no-proxy-server' in args
+    assert '--disable-background-timer-throttling' in args
+    assert '--disable-backgrounding-occluded-windows' in args
+    assert '--disable-renderer-backgrounding' in args
     assert args[-3:] == ['http://127.0.0.1:8877/profiles/custom', 'https://example.com', 'https://example.org']
 
 
@@ -73,6 +76,23 @@ def test_manual_exit_reconciled(profiles, monkeypatch):
     monkeypatch.setattr('chrome_manager.core.process_manager.psutil.Process', Mock(side_effect=psutil.NoSuchProcess(123456)))
     ProcessManager(profiles.database, 1).reconcile()
     assert profiles.show('closed').status == 'stopped'
+
+
+def test_stale_session_reconciliation_keeps_new_running_session(profiles, monkeypatch):
+    profile = profiles.create('new-session', cdp_port=9511)
+    with profiles.database.transaction() as db:
+        db.execute("UPDATE profiles SET status='running' WHERE id=?", (profile.id,))
+        for pid in (111, 222):
+            db.execute('INSERT INTO runtime_sessions(profile_id,pid,process_create_time,cdp_port) VALUES (?,?,1,9511)',
+                       (profile.id, pid))
+    process = Mock()
+    process.create_time.return_value = 1
+    monkeypatch.setattr('chrome_manager.core.process_manager.psutil.Process',
+                        Mock(side_effect=[psutil.NoSuchProcess(111), process]))
+    ProcessManager(profiles.database, 1).reconcile()
+    assert profiles.show('new-session').status == 'running'
+    with profiles.database.read() as db:
+        assert db.execute('SELECT pid FROM runtime_sessions WHERE stopped_at IS NULL').fetchone()[0] == 222
 
 
 def test_web_routes_without_login(tmp_path, monkeypatch):
@@ -256,11 +276,51 @@ def test_stop_requests_graceful_close_first(profiles, monkeypatch):
 
 
 def test_cdp_retries_malformed_http_response(monkeypatch):
-    opener = Mock()
-    opener.open.side_effect = BadStatusLine('malformed response')
-    monkeypatch.setattr('chrome_manager.core.chrome_service.build_opener', Mock(return_value=opener))
-    monkeypatch.setattr('chrome_manager.core.chrome_service.time.monotonic', Mock(side_effect=[0, 0, 2]))
+    probe = Mock(side_effect=BadStatusLine('malformed response'))
+    monkeypatch.setattr('chrome_manager.core.chrome_service.probe_browser', probe)
+    monkeypatch.setattr('chrome_manager.core.chrome_service.time.monotonic', Mock(side_effect=[0, 0, 0, 2]))
     monkeypatch.setattr('chrome_manager.core.chrome_service.time.sleep', Mock())
     with pytest.raises(ChromeStartError):
         ChromeService._wait_for_cdp(19522, 1)
-    opener.open.assert_called_once()
+    probe.assert_called_once()
+
+@pytest.mark.parametrize('invalid', ['', 'directory', 'pid', 'duplicate', 'starting'])
+def test_recover_restarted_browser(profiles, monkeypatch, invalid):
+    profile = profiles.create('restarted', cdp_port=9511)
+    if invalid == 'starting':
+        with profiles.database.transaction() as db:
+            db.execute("UPDATE profiles SET status='starting' WHERE id=?", (profile.id,))
+        profile = profiles.show(profile.name)
+    process = Mock(pid=4321)
+    process.info = {'name': 'chrome.exe', 'cmdline': [
+        '--remote-debugging-port=9511',
+        '--user-data-dir=' + (profile.user_data_dir + '-other' if invalid == 'directory' else profile.user_data_dir)]}
+    process.create_time.return_value = 1700000000
+    process.is_running.return_value = True
+    monkeypatch.setattr('chrome_manager.core.process_manager.psutil.process_iter',
+                        lambda *args: [process, process] if invalid == 'duplicate' else [process])
+    probe = Mock(side_effect=ValueError('PID mismatch') if invalid == 'pid' else None)
+    monkeypatch.setattr('chrome_manager.core.process_manager.probe_browser', probe)
+    manager = ProcessManager(profiles.database, 1)
+    manager.recover_restarted([profile])
+    manager.recover_restarted([profile])  # stale snapshot must not create duplicate sessions
+    with profiles.database.read() as db:
+        sessions = db.execute('SELECT * FROM runtime_sessions WHERE stopped_at IS NULL').fetchall()
+    assert len(sessions) == (0 if invalid else 1)
+    assert profiles.show(profile.name).status == ('starting' if invalid == 'starting' else 'stopped' if invalid else 'running')
+    if not invalid:
+        assert sessions[0]['pid'] == 4321
+        assert sessions[0]['process_create_time'] == 1700000000
+
+
+def test_profile_information_refreshes_status(tmp_path, monkeypatch):
+    monkeypatch.setenv('CHROME_MANAGER_DATA_ROOT', str(tmp_path))
+    app = create_app()
+    database = Database(tmp_path / 'data/chrome_manager.db')
+    manager = ProfileManager(database, tmp_path / 'profiles')
+    profile = manager.create('info-refresh', cdp_port=9511)
+    response = TestClient(app).get('/profiles/info-refresh')
+    assert response.status_code == 200
+    assert f'data-profile-id="{profile.id}"' in response.text
+    assert 'profile-refresh-warning' in response.text
+    assert '20261019-state-sync' in response.text

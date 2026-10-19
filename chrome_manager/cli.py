@@ -7,6 +7,7 @@ import logging
 import typer
 
 from chrome_manager.config import load_settings
+from chrome_manager.core.service_lock import service_lock, ServiceAlreadyRunning
 from chrome_manager.exceptions import ChromeManagerError, ExitCode
 from chrome_manager.utils.logger import capture_web_console
 
@@ -24,6 +25,19 @@ def web(
     dry_run: bool = typer.Option(False, "--dry-run", help="仅校验管理服务，不启动 HTTP 服务或 Chrome。"),
 ) -> None:
     """在当前终端启动管理页面，按 Ctrl+C 停止。"""
+    try:
+        settings = load_settings()
+        with service_lock(settings.data_root / 'data'):
+            _run_web(port, dry_run)
+    except ServiceAlreadyRunning as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(ExitCode.ALREADY_RUNNING) from exc
+    except ChromeManagerError as exc:
+        typer.echo(f"启动失败：{exc}", err=True)
+        raise typer.Exit(ExitCode.INVALID_CONFIGURATION) from exc
+
+
+def _run_web(port: int, dry_run: bool) -> None:
     import uvicorn
 
     from chrome_manager.web import create_app
@@ -58,6 +72,15 @@ def web(
         logger.info("管理服务收到 Ctrl+C，已停止")
     except OSError as exc:
         logger.exception("管理服务启动失败：bind=%s port=%s", settings.bind_address, port)
+        raise typer.Exit(ExitCode.GENERAL_ERROR) from exc
+    except typer.Exit:
+        raise
+    except SystemExit as exc:
+        if exc.code:
+            logger.error('管理服务异常退出，退出码：%s', exc.code)
+        raise
+    except Exception as exc:
+        logger.exception('管理服务发生未处理异常')
         raise typer.Exit(ExitCode.GENERAL_ERROR) from exc
 
 

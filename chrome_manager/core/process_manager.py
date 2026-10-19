@@ -5,9 +5,14 @@ from __future__ import annotations
 import ctypes
 import logging
 import psutil
+import time
+import os
+from pathlib import Path
 
 from chrome_manager.db.database import Database
 from chrome_manager.db.repository import Profile
+from chrome_manager.utils.audit import event, operation, step
+from chrome_manager.core.cdp import probe_browser
 
 
 class ProcessStopError(RuntimeError):
@@ -18,6 +23,67 @@ class ProcessManager:
     def __init__(self, database: Database, shutdown_timeout: int) -> None:
         self.database = database
         self.shutdown_timeout = shutdown_timeout
+
+    def recover_restarted(self, profiles: list[Profile]) -> None:
+        """Reattach only a uniquely identified Chrome root with verified CDP PID.
+
+        Chrome can replace its PID on restart/update outside the manager. Never
+        adopt by port alone or interfere with an in-progress manager start/stop.
+        """
+        eligible = [p for p in profiles if p.status == 'stopped' and p.cdp_port and not p.is_deleted]
+        if not eligible:
+            return
+        candidates = []
+        for process in psutil.process_iter(['name', 'cmdline']):
+            try:
+                args = process.info['cmdline'] or []
+                if (process.info['name'] or '').lower() != 'chrome.exe' or any(a.startswith('--type=') for a in args):
+                    continue
+                candidates.append((process, args))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        for profile in eligible:
+            matches = []
+            for process, args in candidates:
+                directories = [a.split('=', 1)[1] for a in args if a.startswith('--user-data-dir=')]
+                if (f'--remote-debugging-port={profile.cdp_port}' in args and len(directories) == 1
+                        and Path(directories[0]).is_absolute()
+                        and os.path.normcase(os.path.normpath(directories[0])) == os.path.normcase(os.path.normpath(profile.user_data_dir))):
+                    matches.append(process)
+            if len(matches) != 1:
+                continue
+            process = matches[0]
+            try:
+                created = process.create_time()
+                probe_browser(profile.cdp_port, 2, process.pid)
+                if not process.is_running() or process.create_time() != created:
+                    continue
+            except Exception:
+                event('browser.recover.verification_failed', level=logging.WARNING,
+                      profile_id=profile.id, browser_pid=process.pid, port=profile.cdp_port, exc_info=True)
+                continue
+            with self.database.transaction() as connection:
+                changed = connection.execute(
+                    "UPDATE profiles SET status='running', updated_at=CURRENT_TIMESTAMP "
+                    "WHERE id=? AND status='stopped' AND is_deleted=0 AND NOT EXISTS "
+                    "(SELECT 1 FROM runtime_sessions WHERE profile_id=? AND stopped_at IS NULL)",
+                    (profile.id, profile.id),
+                ).rowcount
+                if not changed:
+                    continue
+                connection.execute(
+                    "INSERT INTO runtime_sessions(profile_id,pid,process_create_time,cdp_port,started_at) "
+                    "VALUES (?,?,?,?,datetime(?,'unixepoch'))",
+                    (profile.id, process.pid, created, profile.cdp_port, created),
+                )
+                connection.execute(
+                    "UPDATE cdp_ports SET last_pid=?,last_started_at=datetime(?,'unixepoch') WHERE profile_id=?",
+                    (process.pid, created, profile.id),
+                )
+                connection.execute("INSERT INTO events(profile_id,event_type,message) VALUES (?,'chrome_reattached',?)",
+                                   (profile.id, f'Reattached verified Chrome PID {process.pid} on port {profile.cdp_port}'))
+            event('browser.recover.completed', level=logging.INFO, profile_id=profile.id,
+                  browser_pid=process.pid, port=profile.cdp_port, process_create_time=created)
 
     def reconcile(self) -> None:
         """Close stale running sessions without touching unrelated processes."""
@@ -34,16 +100,28 @@ class ProcessManager:
             except psutil.NoSuchProcess:
                 pass
             except psutil.AccessDenied:
+                event('browser.reconcile.access_denied', level=logging.WARNING,
+                      profile_id=session['profile_id'], browser_pid=session['pid'], exc_info=True)
                 continue
-            with self.database.transaction() as connection:
+            with step('browser.reconcile.stale_session', profile_id=session['profile_id'],
+                      browser_pid=session['pid'], session_id=session['id']), self.database.transaction() as connection:
                 connection.execute("UPDATE runtime_sessions SET stopped_at=CURRENT_TIMESTAMP, stop_reason='process_exited' WHERE id=?", (session['id'],))
-                connection.execute("UPDATE profiles SET status='stopped' WHERE id=? AND status='running'", (session['profile_id'],))
+                stopped = connection.execute(
+                    "UPDATE profiles SET status='stopped' WHERE id=? AND status='running' "
+                    "AND NOT EXISTS (SELECT 1 FROM runtime_sessions WHERE profile_id=? AND stopped_at IS NULL)",
+                    (session['profile_id'], session['profile_id']),
+                ).rowcount
                 connection.execute("INSERT INTO events(profile_id,event_type,message) VALUES (?, 'process_exited', 'Chrome process exited outside manager')", (session['profile_id'],))
             logging.getLogger('chrome_manager.lifecycle').warning('实例 %s 的 Chrome 已退出，状态已同步', session['profile_id'])
 
     def stop_profile(self, profile: Profile) -> None:
         """Stop only the Chrome process whose command line matches this Profile."""
-        with self.database.read() as connection:
+        with operation('browser.stop', profile_id=profile.id, profile_name=profile.name,
+                       port=profile.cdp_port):
+            self._stop_profile(profile)
+
+    def _stop_profile(self, profile: Profile) -> None:
+        with step('browser.stop.find_session'), self.database.read() as connection:
             session = connection.execute(
                 "SELECT id, pid, cdp_port, process_create_time FROM runtime_sessions WHERE profile_id = ? AND stopped_at IS NULL "
                 "ORDER BY id DESC LIMIT 1",
@@ -51,56 +129,83 @@ class ProcessManager:
             ).fetchone()
         if session is None or session["pid"] is None:
             raise ProcessStopError(f"Profile「{profile.name}」没有正在运行的受管进程")
+        event('browser.stop.session', browser_pid=session['pid'], session_id=session['id'],
+              process_create_time=session['process_create_time'])
         try:
-            process = psutil.Process(session["pid"])
-            if session['process_create_time'] is not None and abs(process.create_time() - session['process_create_time']) >= 1:
-                raise ProcessStopError("记录的 PID 已被其他进程使用，已拒绝停止")
-            expected_data_dir = f"--user-data-dir={profile.user_data_dir}"
-            expected_port = f"--remote-debugging-port={session['cdp_port']}"
-            if expected_data_dir not in process.cmdline() or expected_port not in process.cmdline():
-                raise ProcessStopError("记录的 PID 与该 Profile 不匹配，已拒绝停止以保护其他 Chrome")
+            with step('browser.stop.verify_process', browser_pid=session['pid']):
+                process = psutil.Process(session["pid"])
+                if session['process_create_time'] is not None and abs(process.create_time() - session['process_create_time']) >= 1:
+                    raise ProcessStopError("记录的 PID 已被其他进程使用，已拒绝停止")
+                expected_data_dir = f"--user-data-dir={profile.user_data_dir}"
+                expected_port = f"--remote-debugging-port={session['cdp_port']}"
+                if expected_data_dir not in process.cmdline() or expected_port not in process.cmdline():
+                    raise ProcessStopError("记录的 PID 与该 Profile 不匹配，已拒绝停止以保护其他 Chrome")
             # Ask Chrome to close its windows first so session data can be flushed.
-            self._request_close(process.pid)
+            with step('browser.stop.request_close', browser_pid=session['pid']) as result:
+                result['windows_notified'] = self._request_close(process.pid)
             try:
-                process.wait(timeout=self.shutdown_timeout)
+                started = time.perf_counter()
+                event('browser.stop.wait.begin', browser_pid=session['pid'], timeout_seconds=self.shutdown_timeout)
+                exit_code = process.wait(timeout=self.shutdown_timeout)
+                event('browser.stop.wait.completed', browser_pid=session['pid'], exit_code=exit_code,
+                      duration_ms=round((time.perf_counter() - started) * 1000, 2))
             except psutil.TimeoutExpired:
+                event('browser.stop.wait.timeout', level=logging.WARNING, browser_pid=session['pid'],
+                      timeout_seconds=self.shutdown_timeout, exc_info=True)
                 logging.getLogger('chrome_manager.lifecycle').warning('实例 %s 未在超时内退出，将强制结束', profile.id)
-                process.kill()
+                with step('browser.stop.kill', browser_pid=session['pid']):
+                    process.kill()
                 # Windows may acknowledge TerminateProcess before wait handles are
                 # signaled, particularly when Chrome still has renderer children.
-                process.wait(timeout=max(10, self.shutdown_timeout))
+                with step('browser.stop.wait_after_kill', browser_pid=session['pid']) as result:
+                    result['exit_code'] = process.wait(timeout=max(10, self.shutdown_timeout))
         except psutil.NoSuchProcess:
+            event('browser.stop.already_exited', browser_pid=session['pid'])
             pass  # It was manually closed; safely reconcile the stale record.
         except psutil.AccessDenied as exc:
             raise ProcessStopError("Windows 拒绝访问该受管 Chrome 进程") from exc
         except psutil.TimeoutExpired as exc:
             raise ProcessStopError("Chrome 进程仍未退出，请稍后重试") from exc
 
-        with self.database.transaction() as connection:
-            connection.execute("UPDATE profiles SET status = 'stopped', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (profile.id,))
+        with step('browser.stop.record_stopped', browser_pid=session['pid']), self.database.transaction() as connection:
             connection.execute("UPDATE runtime_sessions SET stopped_at = CURRENT_TIMESTAMP, stop_reason = 'manager_stop' WHERE id = ?", (session["id"],))
+            connection.execute(
+                "UPDATE profiles SET status='stopped', updated_at=CURRENT_TIMESTAMP WHERE id=? "
+                "AND NOT EXISTS (SELECT 1 FROM runtime_sessions WHERE profile_id=? AND stopped_at IS NULL)",
+                (profile.id, profile.id),
+            )
             connection.execute("UPDATE cdp_ports SET last_stopped_at = CURRENT_TIMESTAMP WHERE profile_id = ?", (profile.id,))
             connection.execute("INSERT INTO events(profile_id, event_type, message) VALUES (?, 'chrome_stopped', ?)", (profile.id, "Chrome stopped by Chrome Manager"))
         logging.getLogger('chrome_manager.lifecycle').info('实例 %s 已停止', profile.id)
 
     @staticmethod
-    def _request_close(pid: int) -> None:
+    def _request_close(pid: int) -> int:
         user32 = ctypes.windll.user32
         user32.GetWindowThreadProcessId.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
         user32.PostMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t)
 
+        notified = 0
         @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
         def close_window(handle, _):
+            nonlocal notified
             owner = ctypes.c_ulong()
             user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
             if owner.value == pid:
-                user32.PostMessageW(handle, 0x0010, 0, 0)  # WM_CLOSE
+                success = user32.PostMessageW(handle, 0x0010, 0, 0)  # WM_CLOSE
+                event('browser.stop.window_close', browser_pid=pid, window_handle=handle, accepted=bool(success))
+                if success:
+                    notified += 1
             return True
 
         user32.EnumWindows(close_window, 0)
+        return notified
 
     def focus_profile(self, profile: Profile) -> None:
         """Bring the verified managed Chrome window to the foreground on Windows."""
+        with operation('browser.focus', profile_id=profile.id, profile_name=profile.name, port=profile.cdp_port):
+            self._focus_profile(profile)
+
+    def _focus_profile(self, profile: Profile) -> None:
         with self.database.read() as connection:
             session = connection.execute(
                 "SELECT pid, cdp_port FROM runtime_sessions WHERE profile_id = ? AND stopped_at IS NULL "
