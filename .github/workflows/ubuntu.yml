@@ -18,12 +18,14 @@ jobs:
           CM_TEST_NO_SANDBOX: '1'
         run: xvfb-run -a python -m pytest tests/test_live_chrome.py -q
       - name: Prepare disposable user systemd
+        if: success() || failure()
         run: |
           sudo loginctl enable-linger "$USER"
           sudo systemctl start "user@$(id -u).service"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
       - name: Verify real systemd service isolation
+        if: success() || failure()
         env:
           CHROME_MANAGER_SYSTEMD_TEST: '1'
         run: python -m pytest tests/test_systemd_live.py -q

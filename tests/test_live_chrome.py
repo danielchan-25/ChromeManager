@@ -140,6 +140,16 @@ def test_live_autonomous_restart_is_reattached(runtime):
             break
         time.sleep(.2)
     else:
+        with db.read() as c:
+            print('sessions', [dict(r) for r in c.execute('SELECT * FROM runtime_sessions')])
+            print('ports', [dict(r) for r in c.execute('SELECT * FROM cdp_ports')])
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'status']):
+            if str(p.user_data_dir) in ' '.join(proc.info['cmdline'] or []):
+                print('matching process', proc.info)
+        try:
+            print('native probe', probe_browser(native, 3))
+        except Exception as exc:
+            print('native probe failed', repr(exc))
         for path in (settings.data_root / 'logs/profiles' / str(p.id)).glob('chrome*.log'):
             print(path.name, path.read_text(encoding='utf-8', errors='replace')[-6000:])
         pytest.fail('Chrome replacement process was not adopted')
