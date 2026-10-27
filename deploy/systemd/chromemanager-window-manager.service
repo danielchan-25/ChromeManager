@@ -1,0 +1,14 @@
+[Unit]
+Description=ChromeManager display window manager
+Requires=chromemanager-display.service
+After=chromemanager-display.service
+
+[Service]
+Type=exec
+EnvironmentFile=%h/.config/chromemanager/environment
+ExecStart=/usr/bin/openbox --sm-disable
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

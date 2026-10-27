@@ -1,0 +1,32 @@
+name: Ubuntu tests
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  ubuntu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[dev]'
+      - run: bash -n scripts/*.sh
+      - run: python -m pytest -q
+      - name: Isolated real Chrome integration
+        env:
+          CHROME_MANAGER_LIVE_TEST: '1'
+          CM_TEST_NO_SANDBOX: '1'
+        run: python -m pytest tests/test_live_chrome.py -q
+      - name: Prepare disposable user systemd
+        run: |
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Verify real systemd service isolation
+        env:
+          CHROME_MANAGER_SYSTEMD_TEST: '1'
+        run: python -m pytest tests/test_systemd_live.py -q
+      - name: CI service diagnostics
+        if: failure()
+        run: journalctl --user -u 'chromemanager-ci-*' --no-pager -n 150

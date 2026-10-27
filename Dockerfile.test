@@ -1,0 +1,12 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PYTHONUTF8=1
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv curl ca-certificates xvfb xauth openbox wmctrl dbus-x11 fonts-noto-cjk \
+    && curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb \
+    && apt-get install -y /tmp/chrome.deb && rm /tmp/chrome.deb && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY . /app
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -e '.[dev]' \
+    && useradd --create-home --uid 1001 cm && chown -R cm:cm /app
+ENV PATH="/opt/venv/bin:$PATH" CHROME_MANAGER_DATA_ROOT=/tmp/chromemanager-test-data
+USER cm
+CMD ["python", "-m", "pytest", "-q"]

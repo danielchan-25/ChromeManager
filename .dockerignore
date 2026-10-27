@@ -1,0 +1,13 @@
+.git
+.venv
+.data
+.pytest_cache
+**/__pycache__
+**/*.egg-info
+data
+profiles
+backups
+logs
+config/settings.toml
+*.db
+*.sqlite3

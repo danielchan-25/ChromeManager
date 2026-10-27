@@ -1,0 +1,22 @@
+[browser]
+chrome_path = "/usr/bin/google-chrome-stable"
+headless = false
+sandbox = true
+
+[cdp]
+bind_address = "0.0.0.0"
+auto_port_start = 9500
+auto_port_end = 9999
+startup_timeout = 30
+
+[process]
+runtime = "systemd"
+shutdown_timeout = 15
+
+[relay]
+enabled = true
+bind_address = "0.0.0.0"
+
+[logging]
+max_size_mb = 10
+backup_count = 10
