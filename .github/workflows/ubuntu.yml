@@ -10,7 +10,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -e '.[dev]'
-      - run: bash -n scripts/*.sh
+      - run: for script in scripts/*.sh; do bash -n "$script"; done
       - run: python -m pytest -q
       - name: Isolated real Chrome integration
         env:
