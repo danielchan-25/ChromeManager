@@ -10,13 +10,18 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -e '.[dev]'
+      - name: Record Ubuntu runtime versions
+        run: |
+          python --version
+          google-chrome --version
+          systemd --version | head -n 1
       - run: for script in scripts/*.sh; do bash -n "$script"; done
-      - run: python -m pytest -q
+      - run: python -m pytest -q -o addopts=''
       - name: Isolated real Chrome integration
         env:
           CHROME_MANAGER_LIVE_TEST: '1'
           CM_TEST_NO_SANDBOX: '1'
-        run: xvfb-run -a python -m pytest tests/test_live_chrome.py -q
+        run: xvfb-run -a python -m pytest tests/test_live_chrome.py -q -o addopts=''
       - name: Prepare disposable user systemd
         if: success() || failure()
         run: |
@@ -28,7 +33,7 @@ jobs:
         if: success() || failure()
         env:
           CHROME_MANAGER_SYSTEMD_TEST: '1'
-        run: python -m pytest tests/test_systemd_live.py -q
+        run: python -m pytest tests/test_systemd_live.py -q -o addopts=''
       - name: CI service diagnostics
         if: failure()
         run: journalctl --user -u 'chromemanager-ci-*' --no-pager -n 150 || true
