@@ -297,6 +297,7 @@ def test_recover_restarted_browser(profiles, monkeypatch, invalid):
     process.info = {'name': 'chrome', 'cmdline': [
         '--remote-debugging-port=9511',
         '--user-data-dir=' + (profile.user_data_dir + '-other' if invalid == 'directory' else profile.user_data_dir)]}
+    process.cmdline.return_value = process.info['cmdline']
     process.create_time.return_value = 1700000000
     process.is_running.return_value = True
     monkeypatch.setattr('chrome_manager.core.process_manager.psutil.process_iter',

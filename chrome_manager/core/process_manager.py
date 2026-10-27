@@ -6,8 +6,6 @@ import logging
 import subprocess
 import psutil
 import time
-import os
-from pathlib import Path
 
 from chrome_manager.db.database import Database
 from chrome_manager.db.repository import Profile
