@@ -82,6 +82,13 @@ def test_real_systemd_web_restart_preserves_browser_and_cdp_connection(tmp_path)
                 except OSError:
                     time.sleep(.2)
             else:
+                print('relay status', (root / 'data/cdp-lan-status.json').read_text())
+                for path in (root / 'logs/relay').glob('*.jsonl'):
+                    print('relay diagnostics', path.read_text()[-5000:])
+                import psutil
+                for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                    if str(root) in ' '.join(proc.info['cmdline'] or []):
+                        print('systemd process', proc.info)
                 pytest.fail('Systemd relay did not bind')
             connection = websocket.create_connection(version['webSocketDebuggerUrl'], timeout=5, suppress_origin=True, http_no_proxy=['127.0.0.1'])
             connection.send(json.dumps({'id': 1, 'method': 'Browser.getVersion'}))

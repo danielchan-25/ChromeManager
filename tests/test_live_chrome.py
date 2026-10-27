@@ -146,6 +146,8 @@ def test_live_autonomous_restart_is_reattached(runtime):
         for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'status']):
             if str(p.user_data_dir) in ' '.join(proc.info['cmdline'] or []):
                 print('matching process', proc.info)
+        lock = settings.data_root / 'profiles' / p.name / 'User Data' / 'SingletonLock'
+        print('profile lock', os.readlink(lock) if lock.is_symlink() else 'missing')
         try:
             print('native probe', probe_browser(native, 3))
         except Exception as exc:
