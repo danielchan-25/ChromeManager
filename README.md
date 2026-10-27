@@ -127,7 +127,7 @@ systemctl --user start chromemanager-web
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest -q
-CHROME_MANAGER_LIVE_TEST=1 .venv/bin/python -m pytest tests/test_live_chrome.py -q
+CHROME_MANAGER_LIVE_TEST=1 xvfb-run -a .venv/bin/python -m pytest tests/test_live_chrome.py -q
 ```
 
 开发配置默认 `process.runtime="direct"`、`relay.enabled=false`。直接模式用于前台调试；它不提供 systemd 的实例隔离，正式部署请使用示例配置。需要公开端口时另外运行 `python -m chrome_manager.cli relay` 并启用 relay 配置。禁用 relay 时，就绪结果仅表示本机内部 CDP，不表示公开端口可用。
@@ -137,7 +137,7 @@ CHROME_MANAGER_LIVE_TEST=1 .venv/bin/python -m pytest tests/test_live_chrome.py 
 ```bash
 docker build -f Dockerfile.test -t chromemanager-linux:test .
 docker run --rm chromemanager-linux:test
-docker run --rm --shm-size=1g -e CHROME_MANAGER_LIVE_TEST=1 -e CM_TEST_NO_SANDBOX=1 chromemanager-linux:test python -m pytest tests/test_live_chrome.py -q
+docker run --rm --shm-size=1g -e CHROME_MANAGER_LIVE_TEST=1 -e CM_TEST_NO_SANDBOX=1 chromemanager-linux:test xvfb-run -a python -m pytest tests/test_live_chrome.py -q
 ```
 
 容器测试中的 `CM_TEST_NO_SANDBOX` 仅供测试 fixture 使用，生产默认配置保留 sandbox。Windows 上可运行不依赖 Linux 的单元测试；真实浏览器测试只在 Linux 显式开启。

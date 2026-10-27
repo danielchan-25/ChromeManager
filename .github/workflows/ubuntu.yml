@@ -16,7 +16,7 @@ jobs:
         env:
           CHROME_MANAGER_LIVE_TEST: '1'
           CM_TEST_NO_SANDBOX: '1'
-        run: python -m pytest tests/test_live_chrome.py -q
+        run: xvfb-run -a python -m pytest tests/test_live_chrome.py -q
       - name: Prepare disposable user systemd
         run: |
           sudo loginctl enable-linger "$USER"
@@ -29,4 +29,4 @@ jobs:
         run: python -m pytest tests/test_systemd_live.py -q
       - name: CI service diagnostics
         if: failure()
-        run: journalctl --user -u 'chromemanager-ci-*' --no-pager -n 150
+        run: journalctl --user -u 'chromemanager-ci-*' --no-pager -n 150 || true

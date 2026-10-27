@@ -98,6 +98,7 @@ def test_live_public_listener_never_blocks_private_chrome(runtime):
     _, db, profiles, chrome, _, _ = runtime
     p = create(profiles, 'occupied')
     with socket.socket() as occupied:
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         occupied.bind(('127.0.0.1', p.cdp_port)); occupied.listen()
         pid = chrome.start(p)
         with db.read() as c:
@@ -107,7 +108,11 @@ def test_live_public_listener_never_blocks_private_chrome(runtime):
 
 
 def test_live_autonomous_restart_is_reattached(runtime):
-    _, db, profiles, chrome, processes, _ = runtime
+    settings, db, profiles, _, processes, _ = runtime
+    # Chrome's desktop restart handler is a headed feature; exercise the actual
+    # production mode under Xvfb, rather than expecting headless to relaunch.
+    assert os.environ.get('DISPLAY'), 'Run Linux live tests with xvfb-run -a'
+    chrome = ChromeService(db, replace(settings, headless=False))
     p = create(profiles, 'restart')
     old = chrome.start(p)
     with db.read() as c:
@@ -135,6 +140,8 @@ def test_live_autonomous_restart_is_reattached(runtime):
             break
         time.sleep(.2)
     else:
+        for path in (settings.data_root / 'logs/profiles' / str(p.id)).glob('chrome*.log'):
+            print(path.name, path.read_text(encoding='utf-8', errors='replace')[-6000:])
         pytest.fail('Chrome replacement process was not adopted')
     assert public_ready(p.cdp_port, new)['product']
     assert profiles.show(p.name).status == 'running'
