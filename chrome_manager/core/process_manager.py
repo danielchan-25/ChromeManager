@@ -62,10 +62,7 @@ class ProcessManager:
             internal_port = browser_port(self.database, profile)
             matches = []
             for process, args in candidates:
-                directories = [a.split('=', 1)[1] for a in args if a.startswith('--user-data-dir=')]
-                if (f'--remote-debugging-port={internal_port}' in args and len(directories) == 1
-                        and Path(directories[0]).is_absolute()
-                        and os.path.normcase(os.path.normpath(directories[0])) == os.path.normcase(os.path.normpath(profile.user_data_dir))):
+                if matches_profile(process, profile.user_data_dir, internal_port):
                     matches.append(process)
             if len(matches) != 1:
                 continue
@@ -157,10 +154,6 @@ class ProcessManager:
                     raise ProcessStopError('进程身份不匹配，拒绝停止')
                 if session['process_create_time'] is not None and abs(process.create_time() - session['process_create_time']) >= 1:
                     raise ProcessStopError("记录的 PID 已被其他进程使用，已拒绝停止")
-                expected_data_dir = f"--user-data-dir={profile.user_data_dir}"
-                expected_port = f"--remote-debugging-port={session['cdp_port']}"
-                if expected_data_dir not in process.cmdline() or expected_port not in process.cmdline():
-                    raise ProcessStopError("记录的 PID 与该 Profile 不匹配，已拒绝停止以保护其他 Chrome")
             with step('browser.stop.request_close', browser_pid=process.pid) as result:
                 if self.settings.runtime == 'systemd':
                     systemctl('stop', unit_name(profile.id), timeout=self.shutdown_timeout + 15)

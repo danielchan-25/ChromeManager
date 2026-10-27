@@ -6,7 +6,9 @@ import re
 from pathlib import Path
 import shutil
 import signal
+import socket
 import subprocess
+import sys
 
 import psutil
 
@@ -21,12 +23,35 @@ def chrome_root(process, args: list[str]) -> bool:
 def matches_profile(process, directory: str, port: int, created: float | None = None) -> bool:
     try:
         args = process.cmdline()
-        dirs = [a.split('=', 1)[1] for a in args if a.startswith('--user-data-dir=')]
-        return (chrome_root(process, args) and len(dirs) == 1 and Path(dirs[0]).is_absolute()
-                and Path(dirs[0]).resolve() == Path(directory).resolve()
+        return (chrome_root(process, args) and _profile_directory_matches(args, directory, process.pid)
                 and f'--remote-debugging-port={port}' in args
                 and (created is None or abs(process.create_time() - created) < 0.1))
     except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+
+
+def _profile_directory_matches(args: list[str], directory: str, pid: int) -> bool:
+    indices = [i for i, a in enumerate(args) if a.startswith('--user-data-dir=')]
+    if len(indices) != 1 or not Path(directory).is_absolute():
+        return False
+    index = indices[0]
+    value = args[index].split('=', 1)[1]
+    if Path(value).is_absolute() and Path(value).resolve() == Path(directory).resolve():
+        return True
+    # Chrome rewrites its Linux process title after relaunch. psutil then splits
+    # that title on spaces, losing original argv boundaries (psutil issue 1179).
+    # Reconstruct only the known exact switch, and require independent proof
+    # that this PID owns the requested directory; never adopt a prefix match.
+    if sys.platform != 'linux':
+        return False
+    expected = f'--user-data-dir={directory}'.split(' ')
+    if len(expected) < 2 or args[index:index + len(expected)] != expected:
+        return False
+    try:
+        lock = os.readlink(Path(directory) / 'SingletonLock')
+        hostname, owner = lock.rsplit('-', 1)
+        return hostname == socket.gethostname() and owner == str(pid)
+    except (OSError, ValueError):
         return False
 
 
