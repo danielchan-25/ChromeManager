@@ -13,6 +13,7 @@ from uuid import uuid4
 import psutil
 
 from chrome_manager.db.database import Database
+from chrome_manager.core.linux_runtime import _profile_directory_matches
 from chrome_manager.db.repository import Profile
 from chrome_manager.utils.audit import profile_operation, step
 
@@ -56,7 +57,7 @@ class BackupManager:
                 manifest = json.loads((item / "manifest.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if manifest.get("profile_id") == profile.id and manifest.get("profile_name") == profile.name:
+            if isinstance(manifest, dict) and manifest.get("profile_id") == profile.id and manifest.get("profile_name") == profile.name:
                 backups.append({"id": item.name, "created_at": manifest.get("created_at", item.name),
                                 "kind": manifest.get("kind", "manual")})
         return sorted(backups, key=lambda backup: backup["id"], reverse=True)
@@ -81,7 +82,7 @@ class BackupManager:
         expected = f"--user-data-dir={source}"
         for process in psutil.process_iter(["cmdline"]):
             try:
-                if expected in (process.info["cmdline"] or []):
+                if expected in (process.info["cmdline"] or []) or _profile_directory_matches(process.info["cmdline"] or [], str(source), process.pid):
                     raise BackupError("检测到 Chrome 仍在使用该数据目录，请先关闭浏览器")
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
@@ -186,7 +187,8 @@ class BackupManager:
                         manifest = json.loads((candidate.parent / "manifest.json").read_text(encoding="utf-8"))
                     except (OSError, ValueError):
                         continue
-                    if (manifest.get("profile_id") == row["id"] and manifest.get("profile_name") == row["name"]
+                    if (isinstance(manifest, dict) and not candidate.is_symlink() and not candidate.parent.is_symlink()
+                            and manifest.get("profile_id") == row["id"] and manifest.get("profile_name") == row["name"]
                             and manifest.get("kind") == "pre-restore"):
                         candidate.rename(source)
                         logging.getLogger("chrome_manager.backup").warning(

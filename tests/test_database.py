@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from chrome_manager.db.database import Database
@@ -7,11 +8,11 @@ from chrome_manager.db.database import Database
 def test_initialization_creates_current_schema_and_wal(tmp_path: Path) -> None:
     database = Database(tmp_path / "data" / "chrome_manager.db")
     database.initialize()
-    with database.connect() as connection:
+    with closing(database.connect()) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"profiles", "cdp_ports", "proxies", "runtime_sessions", "events", "settings", "schema_version", "resource_samples"} <= tables
-        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 7
-        assert not {'cdp_alert_incidents', 'notification_outbox'} & tables
+        assert {"profiles", "cdp_ports", "proxies", "runtime_sessions", "events", "settings", "schema_version"} <= tables
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 8
+        assert not {'cdp_alert_incidents', 'notification_outbox', 'resource_samples'} & tables
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
@@ -20,12 +21,11 @@ def test_existing_v3_database_upgrades_without_losing_profiles(tmp_path: Path) -
     database = Database(tmp_path / "data" / "chrome_manager.db")
     database.initialize()
     with database.transaction() as connection:
-        connection.execute("DROP TABLE resource_samples")
         connection.execute("UPDATE schema_version SET version = 3")
         connection.execute("INSERT INTO profiles(name, user_data_dir) VALUES ('existing', 'existing-data')")
     database.initialize()
     with database.read() as connection:
-        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 7
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 8
         assert connection.execute("SELECT name FROM profiles").fetchone()[0] == "existing"
 
 

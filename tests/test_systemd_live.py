@@ -1,4 +1,4 @@
-"""Cloud CI only: isolated real user units, never an operator's deployment."""
+"""Opt-in isolated real user units with a unique prefix and fresh test data."""
 import json
 import os
 from pathlib import Path
@@ -14,9 +14,8 @@ import pytest
 import websocket
 
 pytestmark = pytest.mark.skipif(
-    sys.platform != 'linux' or os.environ.get('GITHUB_ACTIONS') != 'true'
-    or os.environ.get('CHROME_MANAGER_SYSTEMD_TEST') != '1',
-    reason='Requires explicitly enabled disposable GitHub Ubuntu VM with user systemd')
+    sys.platform != 'linux' or os.environ.get('CHROME_MANAGER_SYSTEMD_TEST') != '1',
+    reason='Requires explicitly enabled isolated Linux user systemd test')
 
 
 def test_real_systemd_web_restart_preserves_browser_and_cdp_connection(tmp_path):
@@ -27,7 +26,7 @@ def test_real_systemd_web_restart_preserves_browser_and_cdp_connection(tmp_path)
     root = tmp_path / 'data-root'
     settings = Settings(root)
     ensure_data_directories(settings)
-    settings.config_path.write_text('[browser]\nheadless=true\nsandbox=false\n[process]\nruntime="systemd"\n[relay]\nenabled=true\nbind_address="127.0.0.1"\n[cdp]\nbind_address="127.0.0.1"\nstartup_timeout=30\n', encoding='utf-8')
+    settings.config_path.write_text('[browser]\nheadless=true\nsandbox=' + ('false' if os.environ.get('CM_TEST_NO_SANDBOX') == '1' else 'true') + '\n[process]\nruntime="systemd"\n[relay]\nenabled=true\nbind_address="127.0.0.1"\n[cdp]\nbind_address="127.0.0.1"\nstartup_timeout=30\n', encoding='utf-8')
     db = Database(settings.database_path); db.initialize()
     profiles = ProfileManager(db, root / 'profiles')
     with socket.socket() as s:
@@ -93,6 +92,8 @@ def test_real_systemd_web_restart_preserves_browser_and_cdp_connection(tmp_path)
             connection = websocket.create_connection(version['webSocketDebuggerUrl'], timeout=5, suppress_origin=True, http_no_proxy=['127.0.0.1'])
             connection.send(json.dumps({'id': 1, 'method': 'Browser.getVersion'}))
             assert json.loads(connection.recv()).get('result')
+            targets = json.load(opener.open(f'http://127.0.0.1:{p.cdp_port}/json/list', timeout=3))
+            assert any(t.get('url') == f'http://127.0.0.1:{web_port}/profiles/{p.name}' for t in targets)
             ctl('restart', web)
             wait_url(client, '/version')
             connection.send(json.dumps({'id': 2, 'method': 'Browser.getVersion'}))

@@ -21,7 +21,7 @@ from chrome_manager.core.cdp import probe_browser
 from chrome_manager.core.cdp_ports import browser_port
 from chrome_manager.core.linux_runtime import SystemdProcess
 from chrome_manager.db.database import Database
-from chrome_manager.db.repository import Profile
+from chrome_manager.db.repository import Profile, ProfileRepository
 from chrome_manager.utils.audit import event, operation, step
 from logging.handlers import RotatingFileHandler
 
@@ -63,28 +63,31 @@ class ChromeService:
             raise ChromeStartError(f"Profile「{profile.name}」当前状态为 {profile.status}，无法启动")
         if profile.cdp_port is None:
             raise ChromeStartError("Profile 没有分配 CDP 端口")
-        internal_port = browser_port(self.database, profile, True)
-        with step('browser.start.port_check'):
-            if not is_port_available(internal_port):
-                raise ChromeStartError(f"CDP 端口 {profile.cdp_port} 已被其他程序占用")
-
-        arguments = self.arguments(profile, internal_port)
-        event('browser.start.arguments', arguments=arguments)
         with step('browser.start.claim'), self.database.transaction() as connection:
             claimed = connection.execute("UPDATE profiles SET status = 'starting' WHERE id = ? AND status = 'stopped' AND is_deleted = 0", (profile.id,))
             if claimed.rowcount != 1:
                 raise ChromeStartError("实例状态已改变，请刷新后重试")
+            current = ProfileRepository(self.settings.data_root).get_by_name(connection, profile.name)
+            if current is None:
+                raise ChromeStartError('实例已删除，请刷新后重试')
+            profile = current
             connection.execute("INSERT INTO events(profile_id,event_type,message) VALUES (?,'chrome_start','Starting Linux Chrome')", (profile.id,))
 
         process = None
         try:
+            internal_port = browser_port(self.database, profile, True)
+            with step('browser.start.port_check'):
+                if not is_port_available(internal_port):
+                    raise ChromeStartError(f'CDP 端口 {profile.cdp_port} 已被其他程序占用')
+            arguments = self.arguments(profile, internal_port)
+            event('browser.start.arguments', arguments=arguments)
             log_path, native_path = self.prepare_logs(profile)
             with step('browser.start.spawn') as result:
                 if self.settings.runtime == 'systemd':
                     process = SystemdProcess(profile.id)
                 elif self.settings.runtime == 'direct':
                     with log_path.open('ab', buffering=0) as output:
-                        output.write(f'\n=== ChromeManager Linux start profile={profile.id} port={profile.cdp_port} ===\n'.encode())
+                        output.write(f'\n=== ChromeManager start profile={profile.id} port={profile.cdp_port} ===\n'.encode())
                         process = subprocess.Popen(arguments, stdout=output, stderr=output, stdin=subprocess.DEVNULL,
                                                    start_new_session=True,
                                                    env={**os.environ, 'CHROME_LOG_FILE': str(native_path)})

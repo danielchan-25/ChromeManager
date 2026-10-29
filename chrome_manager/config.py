@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+from chrome_manager.exceptions import ConfigurationError
+
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[1] / ".data"
 ENV_DATA_ROOT = "CHROME_MANAGER_DATA_ROOT"
 
@@ -29,6 +31,8 @@ class Settings:
     relay_enabled: bool = False
     relay_bind: str = '0.0.0.0'
     sandbox: bool = True
+    desktop_enabled: bool = False
+    desktop_port: int = 5900
     @property
     def config_path(self) -> Path:
         return self.data_root / "config" / "settings.toml"
@@ -45,7 +49,6 @@ def _read_toml(path: Path) -> dict[str, Any]:
         with path.open("rb") as file:
             return tomllib.load(file)
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        from chrome_manager.exceptions import ConfigurationError
 
         raise ConfigurationError(f"Unable to read settings file: {path}") from exc
 
@@ -56,14 +59,47 @@ def load_settings(data_root: Path | None = None) -> Settings:
     installed = Path.home() / '.config/chromemanager/install.json'
     if not env_root and data_root is None and os.name == 'posix' and installed.is_file():
         try:
-            env_root = str(Path(json.loads(installed.read_text(encoding='utf-8'))['data_root']).resolve())
+            saved = json.loads(installed.read_text(encoding='utf-8'))
+            if not isinstance(saved, dict) or not isinstance(saved.get('data_root'), str) or not saved['data_root'].strip():
+                raise ValueError('Invalid installation metadata')
+            env_root = str(Path(saved['data_root']).resolve())
         except (OSError, ValueError, KeyError) as exc:
-            from chrome_manager.exceptions import ConfigurationError
             raise ConfigurationError('无法读取用户安装位置，请检查 ~/.config/chromemanager/install.json') from exc
     root = Path(env_root) if env_root else (data_root or DEFAULT_DATA_ROOT)
     root = root.expanduser().resolve()
     raw = _read_toml(root / "config" / "settings.toml")
 
+    for section in ('data', 'browser', 'cdp', 'process', 'logging', 'relay', 'desktop'):
+        if section in raw and not isinstance(raw[section], dict):
+            raise ConfigurationError(f'配置段 {section} 必须是 TOML 表')
+    fields = {
+        'data': {'root': str},
+        'browser': {'chrome_path': str, 'headless': bool, 'sandbox': bool},
+        'cdp': {'bind_address': str, 'auto_port_start': int, 'auto_port_end': int, 'startup_timeout': int},
+        'process': {'runtime': str, 'shutdown_timeout': int},
+        'logging': {'max_size_mb': int, 'backup_count': int},
+        'relay': {'enabled': bool, 'bind_address': str},
+        'desktop': {'enabled': bool, 'port': int},
+    }
+    for section, options in fields.items():
+        for key, expected in options.items():
+            if key in raw.get(section, {}) and type(raw[section][key]) is not expected:
+                raise ConfigurationError(f'配置 {section}.{key} 类型错误，需要 {expected.__name__}')
+    for section, key in [('cdp', 'startup_timeout'), ('process', 'shutdown_timeout'),
+                         ('logging', 'max_size_mb'), ('logging', 'backup_count')]:
+        if raw.get(section, {}).get(key, 1) <= 0:
+            raise ConfigurationError(f'配置 {section}.{key} 必须大于 0')
+    start = raw.get('cdp', {}).get('auto_port_start', 9500)
+    end = raw.get('cdp', {}).get('auto_port_end', 9999)
+    if not 9500 <= start <= end <= 65535:
+        raise ConfigurationError('自动 CDP 端口范围必须在 9500–65535 内且起始值不大于结束值')
+    if raw.get('process', {}).get('runtime', 'direct') not in {'direct', 'systemd'}:
+        raise ConfigurationError('process.runtime 必须为 direct 或 systemd')
+    if not 1 <= raw.get('desktop', {}).get('port', 5900) <= 65535:
+        raise ConfigurationError('desktop.port 必须在 1–65535 内')
+    for section in ('cdp', 'relay'):
+        if not raw.get(section, {}).get('bind_address', '0.0.0.0').strip():
+            raise ConfigurationError(f'{section}.bind_address 不能为空')
     data = raw.get("data", {})
     browser = raw.get("browser", {})
     cdp = raw.get("cdp", {})
@@ -77,7 +113,6 @@ def load_settings(data_root: Path | None = None) -> Settings:
             # Older generated settings stored the original machine's .data path.
             # Ignore only that legacy default; explicit external roots belong in the env override.
             if configured_path.name.lower() != ".data":
-                from chrome_manager.exceptions import ConfigurationError
 
                 raise ConfigurationError("请用 CHROME_MANAGER_DATA_ROOT 指定外部数据目录，不要在配置中写绝对路径")
         else:
@@ -98,6 +133,8 @@ def load_settings(data_root: Path | None = None) -> Settings:
         relay_enabled=bool(relay.get('enabled', False)),
         relay_bind=str(relay.get('bind_address', '0.0.0.0')),
         sandbox=bool(browser.get('sandbox', True)),
+        desktop_enabled=raw.get('desktop', {}).get('enabled', False),
+        desktop_port=raw.get('desktop', {}).get('port', 5900),
     )
 
 
@@ -126,6 +163,7 @@ def write_default_settings(settings: Settings) -> Path:
         "bind_address = \"0.0.0.0\"\nauto_port_start = 9500\nauto_port_end = 9999\nstartup_timeout = 15\n\n"
         "[process]\nshutdown_timeout = 10\nruntime = \"direct\"\n\n"
         "[relay]\nenabled = false\nbind_address = \"0.0.0.0\"\n\n"
+        "[desktop]\nenabled = false\nport = 5900\n\n"
         "[logging]\nmax_size_mb = 10\nbackup_count = 10\n",
 
         encoding="utf-8",

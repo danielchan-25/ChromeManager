@@ -1,5 +1,5 @@
 [Unit]
-Description=ChromeManager Linux management console
+Description=ChromeManager management console
 After=network.target chromemanager-relay.service
 Wants=chromemanager-relay.service
 StartLimitIntervalSec=300

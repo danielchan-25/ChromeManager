@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import shutil
 from pathlib import Path
 
@@ -30,7 +31,7 @@ def test_profile_path_follows_relocated_data_root(tmp_path: Path) -> None:
     moved_root.mkdir()
     (moved_root / "data").mkdir()
     shutil.copytree(original.profiles_root, moved_root / "profiles")
-    with original.database.read() as source, sqlite3.connect(moved_root / "data" / "chrome_manager.db") as target:
+    with original.database.read() as source, closing(sqlite3.connect(moved_root / "data" / "chrome_manager.db")) as target:
         source.backup(target)
     relocated = ProfileManager(Database(moved_root / "data" / "chrome_manager.db"), moved_root / "profiles")
     relocated_path = Path(relocated.show("portable").user_data_dir)

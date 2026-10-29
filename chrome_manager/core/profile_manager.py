@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from itertools import chain
 from urllib.parse import urlsplit
 from pathlib import Path
 
@@ -20,8 +21,11 @@ class ProfileError(ValueError):
 
 
 class ProfileManager:
-    def __init__(self, database: Database, profiles_root: Path) -> None:
+    def __init__(self, database: Database, profiles_root: Path, *, auto_port_start: int = 9500, auto_port_end: int = 9999, runtime: str = 'direct') -> None:
         self.database = database
+        self.auto_port_start = auto_port_start
+        self.auto_port_end = auto_port_end
+        self.runtime = runtime
         self.profiles_root = profiles_root.resolve()
         self.repository = ProfileRepository(self.profiles_root.parent)
 
@@ -40,11 +44,13 @@ class ProfileManager:
         proxy_url: str | None = None,
     ) -> Profile:
         self._validate_name(name)
-        if cdp_port is not None and not 9500 <= cdp_port <= 65535:
+        if cdp_port is not None and (type(cdp_port) is not int or not 9500 <= cdp_port <= 65535):
             raise ProfileError("CDP 端口必须在 9500 到 65535 之间")
         user_data_dir = self.profiles_root / name / "User Data"
         normalized_url = self._validate_default_url(default_url)
         proxy = self._parse_proxy(proxy_url)
+        created_directory = False
+        committed = False
         try:
             with self.database.transaction() as connection:
                 existing = self.repository.get_any_by_name(connection, name)
@@ -64,6 +70,7 @@ class ProfileManager:
                     )
                 else:
                     user_data_dir.mkdir(parents=True, exist_ok=False)
+                    created_directory = True
                     profile = self.repository.create(
                         connection, name=name, user_data_dir=f"profiles/{name}/User Data", project_name=project_name,
                         platform=platform, account_name=account_name, description=description, tags=tags,
@@ -73,11 +80,20 @@ class ProfileManager:
                     "INSERT INTO events(profile_id, event_type, message) VALUES (?, ?, ?)",
                     (profile.id, "profile_restored" if existing else "profile_created", "Profile restored" if existing else "Profile created"),
                 )
-                return profile
+            committed = True
+            return profile
         except FileExistsError as exc:
             raise ProfileError(f"Profile「{name}」的数据目录已存在，无法安全创建") from exc
         except sqlite3.IntegrityError as exc:
             raise ProfileError("Profile 名称、数据目录或 CDP 端口已存在") from exc
+        finally:
+            if created_directory and not committed:
+                # Never remove unexpected browser data left by another process.
+                for directory in (user_data_dir, user_data_dir.parent):
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
 
     def list(self) -> list[Profile]:
         with self.database.read() as connection:
@@ -86,13 +102,7 @@ class ProfileManager:
     def suggested_port(self) -> int:
         """Use the next port after the current highest managed CDP port."""
         with self.database.read() as connection:
-            row = connection.execute("SELECT MAX(port) AS port FROM cdp_ports WHERE port >= 9500").fetchone()
-            start = max(9500, (row["port"] or 9499) + 1)
-            assigned = {item[0] for item in connection.execute("SELECT port FROM cdp_ports UNION SELECT backend_port FROM cdp_ports WHERE backend_port IS NOT NULL")}
-        for port in range(start, 65536):
-            if port not in assigned and is_port_available(port):
-                return port
-        raise ProfileError("没有可用的 9500 以上 CDP 端口")
+            return self._find_auto_port(connection)
 
     def show(self, name: str) -> Profile:
         with self.database.read() as connection:
@@ -132,6 +142,13 @@ class ProfileManager:
                 raise ProfileError(f"未找到 Profile「{name}」")
             if profile.status != "stopped":
                 raise ProfileError("请先停止 Profile，再执行删除")
+            if self.runtime == 'systemd':
+                from chrome_manager.core.linux_runtime import systemctl, unit_name
+                import subprocess
+                try:
+                    systemctl('disable', unit_name(profile.id))
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise ProfileError('无法关闭该实例的开机启动，删除已取消') from exc
             self.repository.soft_delete(connection, profile)
             connection.execute(
                 "INSERT INTO events(profile_id, event_type, message) VALUES (?, 'profile_deleted', ?)",
@@ -160,7 +177,7 @@ class ProfileManager:
                 parsed.port
             except ValueError as exc:
                 raise ProfileError("默认打开网址格式不正确") from exc
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or any(c.isspace() for c in parsed.hostname):
                 raise ProfileError("每个默认打开网址都必须是完整的 http 或 https 地址，多个网址请用逗号分隔")
         return ", ".join(values)
 
@@ -182,11 +199,13 @@ class ProfileManager:
         host = f'[{parsed.hostname}]' if ':' in parsed.hostname else parsed.hostname
         return parsed.scheme, host, parsed.port
 
-    @staticmethod
-    def _find_auto_port(connection: sqlite3.Connection) -> int:
+    def _find_auto_port(self, connection: sqlite3.Connection) -> int:
         assigned = {row[0] for row in connection.execute("SELECT port FROM cdp_ports UNION SELECT backend_port FROM cdp_ports WHERE backend_port IS NOT NULL")}
-        highest = connection.execute("SELECT MAX(port) FROM cdp_ports WHERE port >= 9500").fetchone()[0]
-        for port in range(max(9500, (highest or 9499) + 1), 65536):
+        highest = connection.execute("SELECT MAX(port) FROM cdp_ports WHERE port BETWEEN ? AND ?",
+                                     (self.auto_port_start, self.auto_port_end)).fetchone()[0]
+        start = min(self.auto_port_end + 1, (highest or self.auto_port_start - 1) + 1)
+        candidates = chain(range(start, self.auto_port_end + 1), range(self.auto_port_start, start))
+        for port in candidates:
             if port not in assigned and is_port_available(port):
                 return port
-        raise ProfileError("没有可用的 9500 以上 CDP 端口")
+        raise ProfileError("配置范围内没有可用的 CDP 端口")

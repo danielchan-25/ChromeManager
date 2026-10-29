@@ -98,7 +98,7 @@ def initialize(ports: str = typer.Option('', help='可选逗号分隔端口，�
     write_default_settings(settings)
     db = Database(settings.database_path)
     db.initialize()
-    manager = ProfileManager(db, settings.data_root / 'profiles')
+    manager = ProfileManager(db, settings.data_root / 'profiles', auto_port_start=settings.auto_port_start, auto_port_end=settings.auto_port_end, runtime=settings.runtime)
     for port in (int(p.strip()) for p in ports.split(',') if p.strip()):
         name = f'profile-{port}'
         if not any(p.name == name for p in manager.list()):
@@ -139,7 +139,7 @@ def browser_run(profile_id: int):
     ensure_data_directories(settings)
     db = Database(settings.database_path)
     db.initialize()
-    manager = ProfileManager(db, settings.data_root / 'profiles')
+    manager = ProfileManager(db, settings.data_root / 'profiles', auto_port_start=settings.auto_port_start, auto_port_end=settings.auto_port_end, runtime=settings.runtime)
     profile = next((p for p in manager.list() if p.id == profile_id), None)
     if profile is None:
         raise typer.BadParameter('实例不存在或已删除')
@@ -147,7 +147,9 @@ def browser_run(profile_id: int):
     for process in psutil.process_iter(['name']):
         if matches_profile(process, profile.user_data_dir, port):
             raise typer.BadParameter('该实例已有 Chrome 运行，拒绝重复启动')
-    service = ChromeService(db, settings)
+    with db.read() as connection:
+        saved_port = connection.execute("SELECT value FROM settings WHERE key='web_port'").fetchone()
+    service = ChromeService(db, settings, web_port=int(saved_port['value']) if saved_port else 8765)
     if not settings.headless and not os.environ.get('DISPLAY'):
         raise typer.BadParameter('browser-run 有界面模式必须配置 DISPLAY')
     arguments = service.arguments(profile, port)
@@ -164,7 +166,7 @@ def profile_context(name):
     from chrome_manager.db.database import Database
     settings = load_settings()
     db = Database(settings.database_path)
-    manager = ProfileManager(db, settings.data_root / 'profiles')
+    manager = ProfileManager(db, settings.data_root / 'profiles', auto_port_start=settings.auto_port_start, auto_port_end=settings.auto_port_end, runtime=settings.runtime)
     return settings, db, manager, manager.show(name)
 
 

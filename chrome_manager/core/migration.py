@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
+from contextlib import closing
 
 from chrome_manager.config import Settings, ensure_data_directories
 from chrome_manager.core.profile_manager import ProfileManager, ProfileError
@@ -15,14 +16,14 @@ def import_windows_metadata(source: Path, settings: Settings) -> list[str]:
     if source == settings.database_path.resolve():
         raise ProfileError('源数据库与目标数据库不能相同')
     ensure_data_directories(settings)
-    with sqlite3.connect(source.as_uri() + '?mode=ro', uri=True) as old:
+    with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)) as old:
         old.row_factory = sqlite3.Row
         records = old.execute(
             "SELECT p.*,c.port,CASE WHEN px.id IS NULL THEN NULL ELSE px.type || '://' || px.host || ':' || px.port END AS proxy "
             'FROM profiles p JOIN cdp_ports c ON c.profile_id=p.id LEFT JOIN proxies px ON px.id=p.proxy_id WHERE p.is_deleted=0 ORDER BY p.id').fetchall()
     database = Database(settings.database_path)
     database.initialize()
-    manager = ProfileManager(database, settings.data_root / 'profiles')
+    manager = ProfileManager(database, settings.data_root / 'profiles', auto_port_start=settings.auto_port_start, auto_port_end=settings.auto_port_end, runtime=settings.runtime)
     repo = ProfileRepository(settings.data_root)
     made = []
     names = []
@@ -35,7 +36,7 @@ def import_windows_metadata(source: Path, settings: Settings) -> list[str]:
                     raise ProfileError(f'{name}: 公开 CDP 端口无效')
                 if repo.get_any_by_name(db, name) or db.execute('SELECT 1 FROM cdp_ports WHERE port=? OR backend_port=?', (port, port)).fetchone():
                     raise ProfileError(f'{name}: 名称或端口已存在，导入已取消')
-                url = manager._validate_default_url(row['default_url'])
+                url = manager._validate_default_url(row['default_url'] if 'default_url' in row.keys() else None)
                 proxy = manager._parse_proxy(row['proxy'])
                 directory = settings.data_root / 'profiles' / name
                 directory.mkdir(parents=False, exist_ok=False)

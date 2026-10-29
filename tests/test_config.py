@@ -16,6 +16,7 @@ def test_settings_creates_documented_layout(tmp_path: Path) -> None:
 
 
 def test_old_generated_absolute_root_does_not_override_relocated_project(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "test-home"))
     new_root = tmp_path / ".data"
     config_file = new_root / "config" / "settings.toml"
     config_file.parent.mkdir(parents=True)

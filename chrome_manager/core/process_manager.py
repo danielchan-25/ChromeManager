@@ -135,6 +135,25 @@ class ProcessManager:
             self._stop_profile(profile)
 
     def _stop_profile(self, profile: Profile) -> None:
+        with self.database.transaction() as connection:
+            claimed = connection.execute(
+                "UPDATE profiles SET status='stopping' WHERE id=? AND status='running' AND is_deleted=0",
+                (profile.id,),
+            ).rowcount
+            if claimed != 1:
+                raise ProcessStopError('实例正在停止或状态已改变，请刷新后重试')
+        try:
+            self._stop_claimed_profile(profile)
+        finally:
+            with self.database.transaction() as connection:
+                connection.execute(
+                    "UPDATE profiles SET status=CASE WHEN EXISTS "
+                    "(SELECT 1 FROM runtime_sessions WHERE profile_id=? AND stopped_at IS NULL) "
+                    "THEN 'running' ELSE 'stopped' END WHERE id=? AND status='stopping'",
+                    (profile.id, profile.id),
+                )
+
+    def _stop_claimed_profile(self, profile: Profile) -> None:
         with step('browser.stop.find_session'), self.database.read() as connection:
             session = connection.execute(
                 "SELECT id, pid, cdp_port, process_create_time FROM runtime_sessions WHERE profile_id = ? AND stopped_at IS NULL "
@@ -206,7 +225,7 @@ class ProcessManager:
             raise ProcessStopError('实例没有运行中的浏览器')
         try:
             process = psutil.Process(session['pid'])
-            if not matches_profile(process, profile.user_data_dir, session['cdp_port'], session['process_create_time']):
+            if session['process_create_time'] is None or not matches_profile(process, profile.user_data_dir, session['cdp_port'], session['process_create_time']):
                 raise ProcessStopError('进程身份不匹配，拒绝操作窗口')
             focus_window(process.pid)
         except (OSError, subprocess.SubprocessError, psutil.Error) as exc:

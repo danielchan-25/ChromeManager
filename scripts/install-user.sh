@@ -12,9 +12,13 @@ command -v systemctl >/dev/null
 command -v xauth >/dev/null
 command -v Xvfb >/dev/null
 command -v openbox >/dev/null
+command -v x11vnc >/dev/null
+command -v xclip >/dev/null
+test -f /usr/share/novnc/core/rfb.js
 systemctl --user show-environment >/dev/null
 umask 077
 python3 -m venv "$PROJECT/.venv"
+"$PROJECT/.venv/bin/pip" install --upgrade "pip>=26.2,<27"
 "$PROJECT/.venv/bin/pip" install -e "$PROJECT"
 mkdir -p "$DATA_ROOT/config" "$HOME/.config/chromemanager" "$HOME/.config/systemd/user"
 DATA_ROOT=$(cd -- "$DATA_ROOT" && pwd)
@@ -41,7 +45,7 @@ if not environment.exists():
     environment.write_text(''.join(f'{k}={json.dumps(v)}\n' for k,v in values.items()), encoding='utf-8')
     environment.chmod(0o600)
 for source in (project / 'deploy/systemd').glob('*.service'):
-    text = source.read_text().replace('@@PROJECT@@', json.dumps(str(project))).replace('@@PYTHON@@', json.dumps(str(project / '.venv/bin/python')))
+    text = source.read_text().replace('@@PROJECT@@', str(project)).replace('@@PYTHON@@', json.dumps(str(project / '.venv/bin/python'), ensure_ascii=False))
     (Path.home() / '.config/systemd/user' / source.name).write_text(text, encoding='utf-8')
 (config / 'install.json').write_text(json.dumps({'data_root': os.environ['CHROME_MANAGER_DATA_ROOT'], 'project': str(project)}), encoding='utf-8')
 PY
@@ -50,7 +54,7 @@ if [[ ! -f "$HOME/.config/chromemanager/Xauthority" ]]; then
   xauth -f "$HOME/.config/chromemanager/Xauthority" add :99 . "$(mcookie)"
 fi
 systemctl --user daemon-reload
-systemctl --user enable --now chromemanager-display.service chromemanager-window-manager.service chromemanager-relay.service chromemanager-web.service
+systemctl --user enable --now chromemanager-display.service chromemanager-window-manager.service chromemanager-desktop.service chromemanager-relay.service chromemanager-web.service
 echo "Installed. Data: $DATA_ROOT"
 echo "Enable boot without login once as administrator: sudo loginctl enable-linger $(id -un)"
 echo 'Create/import instances, then explicitly enable selected profiles using profile-autostart.'

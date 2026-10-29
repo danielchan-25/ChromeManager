@@ -127,5 +127,5 @@ def test_health_and_page_show_unresponsive_cdp(tmp_path, monkeypatch):
         health = client.get("/health")
         assert health.status_code == 503
         assert health.json()["cdp_failed"] == [profile.id]
-        assert client.get("/api/resources").json()["cdp"][str(profile.id)]["state"] == "failed"
+        assert client.get("/api/status").json()["cdp"][str(profile.id)]["state"] == "failed"
         assert "CDP 连接失败" in client.get("/").text

@@ -1,12 +1,16 @@
-# 首版验证记录
+# ChromeManager 验证记录
 
-验证日期：2026-10-27。
+当前验证日期：2026-10-29。
 
-首版 0.1.0 已实现并推送到独立私有仓库。本文件区分已通过的 Ubuntu 原生 CI、本地检查和仍需目标主机完成的验收。
+项目已统一命名为 ChromeManager，当前仓库提供 Ubuntu 版本。最近一次完整原生测试为 **217 项通过、0 失败、0 跳过**（Ubuntu 26.04 / Python 3.14 / 真实 Chrome / 用户 systemd），包含 206 项单元与回归、3 项真实 Chrome、6 项浏览器 UI、1 项远程桌面和 1 项真实 systemd 集成测试。测试使用隔离的数据、显示和浏览器，不操作业务页面。
 
-## Ubuntu 原生验证：通过
+当前实现已包含网页内浏览器操作、中文粘贴、底部固定实例详情、数据库原子升级和无资源采集的实例状态同步。资源采样表、接口与图表已经移除。
 
-[完整通过的 CI 记录](https://github.com/danielchan-25/ChromeManager-Linux/actions/runs/40470165599)，代码提交 `3b4ade78370f0fda3dbc5e223eb6aeb2b4f31729`。环境为 GitHub 的一次性 Ubuntu 24.04 amd64 主机、Python 3.12、真实 Chrome 与真实 systemd 用户管理器。
+本地部署已验证 Web/浏览器进程独立托管、现有三个实例和 CDP 连接在管理页面更新期间持续正常。仅有 Starlette TestClient 的已知弃用提示，不影响测试结果。当前仓库的后续运行结果见 [Ubuntu 持续集成](https://github.com/danielchan-25/ChromeManager/actions/workflows/ubuntu.yml)。
+
+## 首版 Ubuntu 24.04 原生验证：通过
+
+2026-10-27 的首版原生 CI 已通过，对应[代码提交](https://github.com/danielchan-25/ChromeManager/commit/3b4ade78370f0fda3dbc5e223eb6aeb2b4f31729)。环境为 GitHub 的一次性 Ubuntu 24.04 amd64 主机、Python 3.12、真实 Chrome 与真实 systemd 用户管理器。旧仓库的 CI 页面不再作为当前项目入口，以下保留当时验证范围供追溯。
 
 | 检查 | 结果与范围 |
 | --- | --- |

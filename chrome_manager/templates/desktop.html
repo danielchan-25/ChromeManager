@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ display_name }} · 浏览器</title>
+  <link rel="stylesheet" href="/static/app.css?v=20261029-no-metrics">
+  <link rel="stylesheet" href="/static/desktop.css?v=20261029-no-metrics">
+</head>
+<body data-profile-name="{{ profile.name }}" data-desktop-ready="{{ 'true' if desktop_enabled and not desktop_headless and desktop_assets_available and profile.status == 'running' else 'false' }}">
+  <header class="desktop-toolbar">
+    <a href="/?selected={{ profile.name|urlencode }}">← 管理页面</a>
+    <strong>{{ display_name }}</strong>
+    <span id="desktop-status" role="status" aria-live="polite">正在连接浏览器…</span>
+    <button id="desktop-reconnect" type="button">重新连接</button>
+    <button id="desktop-fullscreen" type="button">全屏</button>
+    <button id="desktop-paste-toggle" type="button" aria-expanded="false" aria-controls="desktop-paste-panel">粘贴文字 / 中文</button>
+  </header>
+  <section id="desktop-paste-panel" class="desktop-paste-panel" hidden>
+    <label for="desktop-paste-text">先在浏览器中点击输入位置，再在此输入或粘贴文字。</label>
+    <textarea id="desktop-paste-text" rows="2" maxlength="65536" placeholder="支持中文；发送后会粘贴到浏览器当前输入框"></textarea>
+    <button id="desktop-paste-send" type="button" disabled>发送到浏览器</button>
+  </section>
+  <p class="desktop-hint">关闭此页面不会停止浏览器。多个实例共用此桌面，请避免同时操作。</p>
+  <main id="desktop-screen" aria-label="浏览器远程桌面"></main>
+  <div id="desktop-error" role="alert" {% if desktop_enabled and not desktop_headless and desktop_assets_available and profile.status == 'running' %}hidden{% endif %}>
+  {% if not desktop_enabled or desktop_headless %}
+  此环境尚未启用网页远程操作，或浏览器使用了无头模式。请检查桌面配置。
+  {% elif not desktop_assets_available %}
+  远程操作组件缺失，请安装 noVNC 后重启管理服务。
+  {% elif profile.status != 'running' %}
+  此实例已停止，请返回管理页面启动浏览器。
+  {% endif %}
+  </div>
+  <script type="module" src="/static/desktop.js?v=20261028"></script>
+</body>
+</html>

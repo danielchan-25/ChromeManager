@@ -1,12 +1,12 @@
-# ChromeManager Linux
+# ChromeManager
 
-Ubuntu 上的独立 Chrome Profile 与 CDP 管理器。基于 [ChromeManager Windows](https://github.com/danielchan-25/ChromeManager) 的现有功能和故障修复移植，保留 MIT 版权。此仓库只包含程序、测试与部署配置，不包含原机器的浏览器数据、数据库、日志或凭据。
+Ubuntu 上的独立 Chrome Profile 与 CDP 管理器。由原 Windows 版本移植，当前仓库统一提供 Ubuntu 版本，保留 MIT 版权。此仓库只包含程序、测试与部署配置，不包含原机器的浏览器数据、数据库、日志或凭据。
 
-首版目标为 **Ubuntu 24.04 LTS amd64 / Python 3.12 / Chrome Stable**。中文管理页面、独立数据目录、代理、默认网址、备份/恢复、资源图表、只读 CDP 与页面检查继续保留。详细范围、故障设计、阶段计划和主机验收见 [移植方案](docs/MIGRATION_PLAN.md)，验证结果见 [测试报告](docs/VALIDATION.md)。
+首版目标为 **Ubuntu 24.04 LTS amd64 / Python 3.12 / Chrome Stable**。提供中文管理页面、独立数据目录、代理、默认网址、备份/恢复、只读 CDP 与页面检查。详细范围、故障设计、阶段计划和主机验收见 [移植方案](docs/MIGRATION_PLAN.md)，验证结果见 [测试报告](docs/VALIDATION.md)。
 
 ## 设计
 
-- 管理页面默认 `0.0.0.0:8765`、无密码。公开 CDP 端口也默认绑定 `0.0.0.0`，按实例独立配置。
+- 管理页面默认 `0.0.0.0:8765`、无密码。公开 CDP 端口也默认绑定 `0.0.0.0`，按实例独立配置。浏览器提交管理操作须与当前控制台同源；跨站写请求返回 403。没有浏览器来源头的本机脚本/API 客户端仍可调用。
 - Chrome 只监听本机内部端口 20000–29999，独立 TCP 转发服务提供公开入口，避免 wildcard 监听与浏览器抢占同一端口。
 - systemd 正式部署为 Web、转发和每个 Chrome 实例分别建立用户服务。重启 Web 不重启浏览器；重启转发本身会断开已有连接，调用方需要有限重连。
 - 只有进程名称、绝对数据目录、端口、创建时间以及实际 CDP 身份相符，才重新接管或操作实例。检测超时不会自动重启业务浏览器。
@@ -20,7 +20,7 @@ Ubuntu 上的独立 Chrome Profile 与 CDP 管理器。基于 [ChromeManager Win
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv curl ca-certificates xvfb xauth openbox wmctrl dbus-user-session dbus-x11 fonts-noto-cjk gnome-keyring libsecret-1-0
+sudo apt-get install -y python3 python3-venv curl ca-certificates xvfb xauth openbox wmctrl x11vnc novnc xclip dbus-user-session dbus-x11 fonts-noto-cjk gnome-keyring libsecret-1-0
 curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/google-chrome.deb
 sudo apt-get install -y /tmp/google-chrome.deb
 ```
@@ -32,13 +32,13 @@ Chrome 的下载、网站 DNS/HTTPS 和业务网络访问需要可用；程序�
 以最终运行服务的普通用户克隆项目，在该用户的 SSH/登录会话中执行：
 
 ```bash
-git clone https://github.com/danielchan-25/ChromeManager-Linux.git
-cd ChromeManager-Linux
+git clone https://github.com/danielchan-25/ChromeManager.git
+cd ChromeManager
 export CHROME_MANAGER_DATA_ROOT="$HOME/.local/share/chromemanager/data-root"
 bash scripts/install-user.sh
 ```
 
-安装脚本建立项目自己的 `.venv`，首次复制 `config/settings.example.toml`，生成用户服务及配置；既有 settings 和环境文件不会被覆盖。默认数据目录可改成已经授予该用户写权限的 `/srv/chromemanager`。安装位置记在 `~/.config/chromemanager/install.json`，以后 `scripts/cm.sh` 会定位该数据目录。
+安装脚本建立项目自己的 `.venv`，将安装工具 pip 更新至 26.2 及以上的 26.x 版本，首次复制 `config/settings.example.toml`，生成用户服务及配置；既有 settings 和环境文件不会被覆盖。默认数据目录可改成已经授予该用户写权限的 `/srv/chromemanager`。安装位置记在 `~/.config/chromemanager/install.json`，以后 `scripts/cm.sh` 会定位该数据目录。
 
 管理员为该用户开启无需登录的用户服务：
 
@@ -49,7 +49,7 @@ sudo loginctl enable-linger <运行用户名>
 服务清单：
 
 ```bash
-systemctl --user status chromemanager-web chromemanager-relay chromemanager-display
+systemctl --user status chromemanager-web chromemanager-relay chromemanager-display chromemanager-desktop
 journalctl --user -u chromemanager-web -u chromemanager-relay --since today
 bash scripts/cm.sh doctor
 ```
@@ -71,20 +71,25 @@ bash scripts/cm.sh profile-autostart profile-9601 --enable
 bash scripts/cm.sh profile-autostart profile-9610 --enable
 ```
 
+删除实例会同时关闭该实例的开机启动；保留的浏览器数据目录不会删除。
+
 `profile-autostart` 只改变下次开机启动策略，不会立即启动。页面“停止”只停止当前运行；若也不希望下次开机启动，请执行 `profile-autostart <名称> --disable`。systemd 对异常退出有限重试；正常关闭 Chrome 或手动停止服务不会被本程序周期性强行复活。不要另外用 cron、桌面自启动或第二份安装重复启动同一数据目录。
 
 ## 显示与远程操作
 
 默认由普通用户的 Xvfb 提供固定 `DISPLAY=:99`，Openbox 提供窗口管理；X11 只用本机 socket，并使用用户私有 Xauthority。浏览器运行不依赖远程桌面客户端保持连接。现有桌面用户也可自行将环境文件的 DISPLAY/XAUTHORITY 改为实际 X11 会话。
 
-Xvfb 不等于远程桌面，也不负责解锁密钥环。扫码、验证码需要额外安装 VNC 客户端/服务，连接同一个显示会话，例如 `x11vnc` 配合密码与 SSH 隧道：
+管理页面选中运行中的实例，点击“打开浏览器”，会在新标签页显示当前浏览器桌面，可直接点击、输入、扫码和操作浏览器弹窗；关闭查看页不停止实例。连接中、断开及失败均有提示，可点击“重新连接”。中文或长文本可用“粘贴文字 / 中文”。多个实例共用显示桌面，打开时会激活选定实例，应避免同时操作不同实例。
 
-```bash
-# 仅在配置好 VNC 密码后运行；连接限定在本机，远程通过 SSH 隧道进入。
-x11vnc -display :99 -auth "$HOME/.config/chromemanager/Xauthority" -localhost -usepw -forever
+正式安装默认启用 `[desktop] enabled=true, port=5900`；已有安装需补充配置并启用 `chromemanager-desktop` 用户服务。此服务运行 x11vnc，**仅监听本机回环地址**，浏览器通过管理页面同源 WebSocket 转发，沿用当前 LAN 无密码控制台的访问方式，无需对外开放 VNC 端口或安装客户端。noVNC 静态资源由系统包本地提供，无外部 CDN。禁用桌面或启用 headless 时，查看页会显示原因。
+
+```toml
+[desktop]
+enabled = true
+port = 5900
 ```
 
-凭据保存需要可用的 D-Bus 与 GNOME Keyring/兼容 secret service，并验证重启后的解锁方式。首版不自动设置无密码密钥环，也不以 `--password-store=basic` 绕过凭据保护。前台激活只在 X11 + wmctrl 下提供；Wayland 不承诺同样的窗口控制。可配置 `browser.headless=true` 供无人值守流程使用，但须另行验证网站登录与验证码。
+Xvfb 与网页桌面不负责解锁密钥环。凭据保存需要可用的 D-Bus 与 GNOME Keyring/兼容 secret service，并验证重启后的解锁方式。首版不自动设置无密码密钥环，也不以 `--password-store=basic` 绕过凭据保护。前台激活只在 X11 + wmctrl 下提供；Wayland 不承诺同样的窗口控制。可配置 `browser.headless=true` 供无人值守流程使用，但须另行验证网站登录与验证码。
 
 ## 从 Windows 导入
 
@@ -105,7 +110,8 @@ systemctl --user start chromemanager-web
 - 管理页面：`http://<Ubuntu局域网IP>:8765`
 - 浏览器：`http://<Ubuntu局域网IP>:9600`（其他实例用各自端口）
 - 调用前检查：`GET /api/cdp/9600/health`，HTTP 200 且 `ready:true` 才表示最近一次本机检查及该公开转发均正常。
-- `/health` 汇总管理采样、浏览器/页面、转发及持续高资源异常；端口连通不代表网站业务请求一定成功。
+- `/api/status` 仅提供实例运行状态和浏览器连接状态，不采集 CPU/内存，也不保存历史指标。
+- `/health` 汇总实例状态同步、浏览器/页面与转发检查；端口连通不代表网站业务请求一定成功。
 - 调用方断开自己的 CDP 客户端，不调用 `Browser.close`、不关闭其他任务的页面；连接与业务步骤必须设置超时。提交结果不明时先核验，避免重复执行。
 
 延续 LAN 无密码需求。管理员应按实际网段在防火墙放行 8765 和登记的公开 CDP 端口；20000–29999 仅供本机 Chrome 使用。程序不自动启用或改写主机防火墙。部署验收必须从另一台 LAN 主机同时验证 HTTP `/json/version`、返回的 WebSocket 地址及实际 CDP 指令。
@@ -123,21 +129,34 @@ systemctl --user start chromemanager-web
 
 ## 测试与开发
 
+自动分配端口遵循 `cdp.auto_port_start`–`auto_port_end`，到达上限后会搜索范围内空闲端口；显式指定的端口可使用 9500–65535。
+
 ```bash
 python3 -m venv .venv
+.venv/bin/pip install --upgrade 'pip>=26.2,<27'
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest -q
 CHROME_MANAGER_LIVE_TEST=1 xvfb-run -a .venv/bin/python -m pytest tests/test_live_chrome.py -q
 ```
+
+显式运行独立 systemd 集成测试（以普通用户在可用的用户 systemd 会话内执行）：
+
+```bash
+CHROME_MANAGER_SYSTEMD_TEST=1 .venv/bin/python -m pytest tests/test_systemd_live.py -q
+```
+
+该测试使用临时数据目录、独立端口和随机服务名前缀；结束后清理对应测试服务。真实浏览器测试同时覆盖页面恢复确认、删除目标和只读信息页。测试默认保留 Chrome sandbox；一次性容器需显式设置测试用的 `CM_TEST_NO_SANDBOX=1`。
 
 开发配置默认 `process.runtime="direct"`、`relay.enabled=false`。直接模式用于前台调试；它不提供 systemd 的实例隔离，正式部署请使用示例配置。需要公开端口时另外运行 `python -m chrome_manager.cli relay` 并启用 relay 配置。禁用 relay 时，就绪结果仅表示本机内部 CDP，不表示公开端口可用。
 
 `Dockerfile.test` 仅用于隔离 Ubuntu 代码与真实 Chrome 验证，不代替主机 systemd/开机验收：
 
 ```bash
-docker build -f Dockerfile.test -t chromemanager-linux:test .
-docker run --rm chromemanager-linux:test
-docker run --rm --shm-size=1g -e CHROME_MANAGER_LIVE_TEST=1 -e CM_TEST_NO_SANDBOX=1 chromemanager-linux:test xvfb-run -a python -m pytest tests/test_live_chrome.py -q
+docker build -f Dockerfile.test -t chromemanager:test .
+docker run --rm --init chromemanager:test
+docker run --rm --init --shm-size=1g -e CHROME_MANAGER_LIVE_TEST=1 -e CM_TEST_NO_SANDBOX=1 chromemanager:test xvfb-run -a python -m pytest tests/test_live_chrome.py -q
 ```
+
+`--init` 为容器提供独立的 PID 1，避免 Xvfb 启动握手停滞并回收测试子进程。
 
 容器测试中的 `CM_TEST_NO_SANDBOX` 仅供测试 fixture 使用，生产默认配置保留 sandbox。Windows 上可运行不依赖 Linux 的单元测试；真实浏览器测试只在 Linux 显式开启。

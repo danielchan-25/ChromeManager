@@ -1,0 +1,18 @@
+[Unit]
+Description=ChromeManager browser desktop (loopback VNC)
+Requires=chromemanager-display.service
+After=chromemanager-display.service chromemanager-window-manager.service
+
+[Service]
+Type=exec
+EnvironmentFile=%h/.config/chromemanager/environment
+WorkingDirectory=@@PROJECT@@
+ExecStart=@@PYTHON@@ -m chrome_manager.desktop
+Restart=on-failure
+RestartSec=3
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

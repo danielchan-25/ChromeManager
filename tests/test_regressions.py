@@ -14,7 +14,7 @@ from chrome_manager.core.process_manager import ProcessManager
 from chrome_manager.core.profile_manager import ProfileManager, ProfileError
 from chrome_manager.db.database import Database
 from chrome_manager.web import create_app
-from chrome_manager.web import ResourceMonitor
+from chrome_manager.core.instance_status import StatusSynchronizer
 from chrome_manager.cli import app as cli_app
 from chrome_manager import __version__
 from chrome_manager.web import version_info
@@ -103,8 +103,8 @@ def test_web_routes_without_login(tmp_path, monkeypatch):
         assert client.get('/health').json()['status'] == 'ok'
         assert client.get('/profiles', follow_redirects=False).status_code == 303
         assert client.get('/').status_code == 200
-        assert client.get('/api/resources').json()['samples']
-        assert client.post('/profiles/missing/stop', headers={'Origin': 'https://example.invalid'}, follow_redirects=False).status_code == 303
+        assert client.get('/api/status').json()['checked_at'] > 0
+        assert client.post('/profiles/missing/stop', headers={'Origin': 'https://example.invalid'}, follow_redirects=False).status_code == 403
         assert client.get('/profiles/missing').status_code == 404
 
 
@@ -192,37 +192,26 @@ def test_profile_info_accessible_from_lan_without_login(tmp_path, monkeypatch):
         assert client.get('/profiles/info').status_code == 200
 
 
-def test_resource_history_survives_monitor_restart(profiles):
-    first = ResourceMonitor(profiles.database, profiles)
-    snapshot = first.sample()
-    second = ResourceMonitor(profiles.database, profiles)
-    assert second.samples()[-1] == snapshot
-    with profiles.database.read() as db:
-        assert db.execute('SELECT COUNT(*) FROM resource_samples').fetchone()[0] == 1
+def test_state_synchronizer_does_not_collect_hardware_metrics(profiles, monkeypatch):
+    forbidden = Mock(side_effect=AssertionError('Hardware metrics must not be collected'))
+    monkeypatch.setattr(psutil, 'cpu_percent', forbidden)
+    monkeypatch.setattr(psutil, 'virtual_memory', forbidden)
+    monkeypatch.setattr(psutil.Process, 'memory_info', forbidden)
+    synchronizer = StatusSynchronizer(profiles.database, profiles)
+    synchronizer.refresh()
+    assert synchronizer.snapshot()['checked_at'] > 0
+    forbidden.assert_not_called()
 
 
-def test_resource_alerts_require_sustained_pressure(profiles):
-    monitor = ResourceMonitor(profiles.database, profiles)
-    now = int(__import__('time').time())
-    for index in range(17):
-        monitor.history.append({'timestamp': now - (17 - index) * 10,
-                                'system': {'cpu': 96, 'memory_percent': 91}})
-    assert monitor.alerts() == ['本机 CPU 连续约 30 秒达到 95%']
-    monitor.history.append({'timestamp': now, 'system': {'cpu': 96, 'memory_percent': 91}})
-    assert '本机内存连续约 3 分钟达到 90%' in monitor.alerts()
-    monitor.history.append({'timestamp': now + 10, 'system': {'cpu': 20, 'memory_percent': 80}})
-    assert monitor.alerts() == []
-
-
-def test_initial_resource_failure_keeps_page_available(tmp_path, monkeypatch):
+def test_initial_status_failure_keeps_page_available(tmp_path, monkeypatch):
     monkeypatch.setenv('CHROME_MANAGER_DATA_ROOT', str(tmp_path))
-    monkeypatch.setattr('chrome_manager.web.resource_snapshot', Mock(side_effect=RuntimeError('sensor failed')))
+    monkeypatch.setattr(StatusSynchronizer, 'refresh', Mock(side_effect=RuntimeError('state unavailable')))
     with TestClient(create_app()) as client:
         assert client.get('/').status_code == 200
         assert client.get('/health').status_code == 503
-        payload = client.get('/api/resources').json()
-        assert payload['samples'] == []
-        assert '资源采集失败' in payload['warning']
+        payload = client.get('/api/status').json()
+        assert payload['checked_at'] == 0
+        assert '实例状态更新失败' in payload['warning']
 
 
 def test_cli_only_exposes_web(tmp_path):
@@ -236,25 +225,25 @@ def test_cli_only_exposes_web(tmp_path):
     assert runner.invoke(cli_app, ['create', 'demo'], env=environment).exit_code != 0
 
 
-def test_monitor_recovers_after_sample_error(profiles, monkeypatch):
-    monitor = ResourceMonitor(profiles.database, profiles)
-    real_sample = monitor.sample
+def test_state_synchronizer_recovers_after_temporary_error(profiles, monkeypatch):
+    synchronizer = StatusSynchronizer(profiles.database, profiles)
+    real_refresh = synchronizer.refresh
     calls = 0
 
-    def sample():
+    def refresh():
         nonlocal calls
         calls += 1
         if calls == 2:
-            raise RuntimeError('temporary sampling failure')
-        return real_sample()
+            raise RuntimeError('temporary status failure')
+        real_refresh()
 
-    monkeypatch.setattr(monitor, 'sample', sample)
-    monkeypatch.setattr(monitor.stop_event, 'wait', Mock(side_effect=[False, False, True]))
-    monitor.start()
-    monitor.thread.join(timeout=5)
+    monkeypatch.setattr(synchronizer, 'refresh', refresh)
+    monkeypatch.setattr(synchronizer.stop_event, 'wait', Mock(side_effect=[False, False, True]))
+    synchronizer.start()
+    synchronizer.thread.join(timeout=5)
     assert calls == 3
-    assert monitor.error is None
-    assert len(monitor.samples()) == 2
+    assert synchronizer.snapshot()['warning'] is None
+    assert synchronizer.snapshot()['checked_at'] > 0
 
 
 def test_stop_requests_graceful_close_first(profiles, monkeypatch):
@@ -326,4 +315,4 @@ def test_profile_information_refreshes_status(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert f'data-profile-id="{profile.id}"' in response.text
     assert 'profile-refresh-warning' in response.text
-    assert '20261019-state-sync' in response.text
+    assert 'src="/static/app.js?v=' in response.text

@@ -17,6 +17,7 @@ class Database:
         self.path = path
 
     def connect(self) -> sqlite3.Connection:
+        connection = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(self.path)
@@ -25,14 +26,17 @@ class Database:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA busy_timeout = 5000")
             return connection
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
+            if connection is not None:
+                connection.close()
             raise DatabaseError(f"Unable to open database: {self.path}") from exc
 
     def initialize(self) -> None:
-        from chrome_manager.db.migrations import v001, v002, v003, v004, v005, v006, v007
+        from chrome_manager.db.migrations import v001, v002, v003, v004, v005, v006, v007, v008
 
         connection = self.connect()
         try:
+            connection.execute("BEGIN IMMEDIATE")
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
             ).fetchone()
@@ -59,11 +63,17 @@ class Database:
             if version is not None and version['version'] == v006.VERSION:
                 v007.apply(connection)
                 version = connection.execute('SELECT version FROM schema_version').fetchone()
-            if version is None or version["version"] != v007.VERSION:
+            if version is not None and version['version'] == v007.VERSION:
+                v008.apply(connection)
+                version = connection.execute('SELECT version FROM schema_version').fetchone()
+            if version is None or version["version"] != v008.VERSION:
                 raise DatabaseError("Unsupported database schema version")
             connection.execute("DROP TABLE IF EXISTS notification_outbox")
             connection.execute("DROP TABLE IF EXISTS cdp_alert_incidents")
             connection.commit()
+        except sqlite3.Error as exc:
+            connection.rollback()
+            raise DatabaseError(f"Unable to initialize database: {self.path}") from exc
         finally:
             connection.close()
 
@@ -74,9 +84,15 @@ class Database:
             connection.execute("BEGIN IMMEDIATE")
             yield connection
             connection.commit()
+        except sqlite3.IntegrityError:
+            connection.rollback()
+            raise
         except sqlite3.Error as exc:
             connection.rollback()
             raise DatabaseError("Database transaction failed") from exc
+        except BaseException:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 

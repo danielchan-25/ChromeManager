@@ -1,10 +1,10 @@
-# ChromeManager Linux 移植方案
+# ChromeManager 移植方案
 
-日期：2026-10-27。目标：Ubuntu 24.04 LTS amd64、Python 3.12、普通专用用户、Chrome Stable，默认保留有界面浏览器。此项目独立于 Windows 源目录，禁止复制或提交生产数据库、浏览器 Profile、Cookie、日志、密钥或机器配置。
+日期：2026-10-27。目标：Ubuntu 24.04 LTS amd64、Python 3.12、普通专用用户、Chrome Stable，默认保留有界面浏览器。当前仓库已用 Ubuntu 代码替换原 Windows 版本，禁止复制或提交生产数据库、浏览器 Profile、Cookie、日志、密钥或机器配置。
 
 ## 1. 首版范围与验收
 
-- 保留中文 Web 页面、实例元数据、独立 Profile、代理、默认网址、备份/恢复、资源与 CDP 检查。
+- 保留中文 Web 页面、实例元数据、独立 Profile、代理、默认网址、备份/恢复与 CDP 检查。
 - Web 默认 `0.0.0.0:8765`、无密码；每个实例保持固定公开 CDP 端口，Chrome 只监听独立本机内部端口。
 - 启停、正常退出、浏览器自行重启和重新接管均核验 PID、进程创建时间、绝对数据路径及 CDP 返回的浏览器身份。
 - systemd 部署中每个浏览器使用独立用户服务单元；Web、转发、显示服务分别托管。重启 Web 不应停止浏览器或已经建立的 CDP 连接。
@@ -47,7 +47,7 @@ systemd 用户服务（专用非 root 用户）
 
 - 建议 8 vCPU / 16 GB RAM / 100 GB SSD；三个轻量实例测试可用 4 vCPU / 8 GB。
 - Python 3.12 venv、Google Chrome Stable、Xvfb/轻量窗口管理器或现有 X11 桌面、D-Bus、字体和可用密钥环。
-- 推荐代码 `/opt/chromemanager-linux`；数据 `/srv/chromemanager`，通过 `CHROME_MANAGER_DATA_ROOT` 指定。
+- 推荐代码 `/opt/chromemanager`；数据 `/srv/chromemanager`，通过 `CHROME_MANAGER_DATA_ROOT` 指定。
 - 数据包含 `data/`、`profiles/`、`logs/`、`backups/`、`config/settings.toml`，只允许专用用户写入。
 - Web 和 CDP 无密码延续现有需求；防火墙按实际 LAN 网段放行 8765 和登记的公开端口，内部端口不对外开放。
 - 远程桌面连接到同一个持久显示会话，断开远程客户端不等于停止显示服务；Xvfb 仅提供显示，不提供安全凭据存储。
@@ -55,7 +55,7 @@ systemd 用户服务（专用非 root 用户）
 
 ## 5. 分阶段实施
 
-阶段 1–6 已完成，独立仓库为 [ChromeManager-Linux](https://github.com/danielchan-25/ChromeManager-Linux)。Ubuntu 原生自动化验证已通过，详见 [验证记录](VALIDATION.md)。阶段 7 为收到目标 Ubuntu 主机后执行的迁移验收。
+阶段 1–6 已完成，统一仓库为 [ChromeManager](https://github.com/danielchan-25/ChromeManager)。Ubuntu 原生自动化验证已通过，详见 [验证记录](VALIDATION.md)。阶段 7 为收到目标 Ubuntu 主机后执行的迁移验收。
 
 1. 建立独立源代码快照，保留 MIT 版权；不复制 `.git`、venv 和生产状态。
 2. Linux 平台适配：查找可执行文件、启动、进程身份、正常关闭、可选 X11 窗口操作。
@@ -79,8 +79,8 @@ systemd 用户服务（专用非 root 用户）
 - [ ] 错误端口或错误进程不能被接管、停止或转发。
 - [ ] 单实例卡死、公开端口被占用时，其他实例仍能被外部项目正常使用。
 - [ ] 主机重启后密钥环可用、登录保持策略明确，扫码和验证码可人工完成。
-- [ ] CPU/内存压力、网站超时与 CDP 失效分别记录；不因一个探测超时自动重启业务浏览器。
-- [ ] 48 小时观察期间无未解释的进程消失、资源持续增长或状态长期不一致。
+- [ ] 网站超时与 CDP 失效分别记录；不因一个探测超时自动重启业务浏览器。
+- [ ] 48 小时观察期间无未解释的进程消失或状态长期不一致。
 
 ## 8. 首版限制
 
@@ -95,7 +95,7 @@ systemd 用户服务（专用非 root 用户）
 | 主机准备 | 2–4 小时 | 安装依赖、专用用户、磁盘目录、普通用户 sandbox、固定显示；doctor 无配置错误 |
 | 单实例试迁 | 2–4 小时 | 导入元数据、重新登录、核验目录与 PID、从另一台主机验证 CDP 指令 |
 | 三实例并发 | 半天 | 三个调用项目使用不同端口同时运行，演练 Web 重启、Chrome 重启、端口冲突与调用超时 |
-| 稳定观察 | 至少 48 小时 | 检查状态一致性、重连、资源和日志增长；无未解释的中断后再正式切换 |
+| 稳定观察 | 至少 48 小时 | 检查状态一致性、重连和日志增长；无未解释的中断后再正式切换 |
 | 正式切换 | 30–60 分钟 | 暂停 Windows 任务，保存进度，将调用地址切到 Ubuntu IP，逐项恢复并核验结果 |
 
 以上为部署估算，不包含网站审核、复杂验证码和业务项目自身故障。未完成验收时保留 Windows 为可回退环境。

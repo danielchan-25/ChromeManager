@@ -8,8 +8,7 @@ VERSION = 1
 
 
 def apply(connection: sqlite3.Connection) -> None:
-    connection.executescript(
-        """
+    schema = """
         CREATE TABLE schema_version (version INTEGER NOT NULL);
         INSERT INTO schema_version(version) VALUES (1);
 
@@ -90,4 +89,6 @@ def apply(connection: sqlite3.Connection) -> None:
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         """
-    )
+    for statement in schema.split(";"):
+        if statement.strip():
+            connection.execute(statement)

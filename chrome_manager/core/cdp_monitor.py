@@ -58,7 +58,12 @@ class CdpMonitor:
 
     @staticmethod
     def _page_label(url: str) -> str:
-        parsed = urlsplit(url)
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return '[invalid URL]'
+        if parsed.scheme not in {'http', 'https', 'about'}:
+            return parsed.scheme + ':' if parsed.scheme else '[local page]'
         host = parsed.netloc.rsplit("@", 1)[-1]
         return urlunsplit((parsed.scheme, host, parsed.path, "", ""))[:200]
 

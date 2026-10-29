@@ -1,0 +1,19 @@
+/* The remote viewer shares the management console's compact native controls. */
+body { margin: 0; height: 100dvh; display: flex; flex-direction: column; }
+.desktop-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 8px; background: #fafafa; border-bottom: 1px solid #888; font-size: 12px; }
+.desktop-toolbar strong { max-width: 28vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#desktop-status { margin-right: auto; }
+.desktop-toolbar button { font-size: 12px; }
+.desktop-hint { margin: 0; padding: 4px 8px; font-size: 11px; color: #555; }
+#desktop-screen { flex: 1; min-height: 0; overflow: hidden; background: #ddd; }
+#desktop-screen:fullscreen { width: 100vw; height: 100vh; }
+#desktop-error { padding: 6px 8px; background: #fffafa; color: #a00; border-top: 1px solid #b88; font-size: 12px; }
+.desktop-paste-panel { padding: 6px 8px; background: #fff; border-bottom: 1px solid #888; }
+.desktop-paste-panel label { display: block; margin-bottom: 5px; font-size: 12px; }
+.desktop-paste-panel textarea { vertical-align: middle; width: min(75vw, 800px); min-height: 48px; font-size: 13px; }
+.desktop-paste-panel button { font-size: 12px; }
+@media (max-width: 700px) {
+  .desktop-toolbar strong { max-width: 60vw; }
+  #desktop-status { flex-basis: 100%; }
+  .desktop-paste-panel textarea { width: 100%; margin-bottom: 5px; }
+}

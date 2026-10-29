@@ -47,3 +47,5 @@ config/settings.toml
 *.sqlite
 *.sqlite3
 *.log
+
+.ruff_cache/
