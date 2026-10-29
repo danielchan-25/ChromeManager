@@ -1,8 +1,8 @@
 # ChromeManager
 
-Ubuntu 上的独立 Chrome Profile 与 CDP 管理器。由原 Windows 版本移植，当前仓库统一提供 Ubuntu 版本，保留 MIT 版权。此仓库只包含程序、测试与部署配置，不包含原机器的浏览器数据、数据库、日志或凭据。
+Ubuntu 上的独立 Chrome Profile 与 CDP 管理器，采用 MIT 许可证。此仓库只包含程序、测试与部署配置，不包含浏览器数据、数据库、日志或凭据。
 
-首版目标为 **Ubuntu 24.04 LTS amd64 / Python 3.12 / Chrome Stable**。提供中文管理页面、独立数据目录、代理、默认网址、备份/恢复、只读 CDP 与页面检查。详细范围、故障设计、阶段计划和主机验收见 [移植方案](docs/MIGRATION_PLAN.md)，验证结果见 [测试报告](docs/VALIDATION.md)。
+首版目标为 **Ubuntu 24.04 LTS amd64 / Python 3.12 / Chrome Stable**。提供中文管理页面、独立数据目录、代理、默认网址、备份/恢复、只读 CDP 与页面检查。验证结果见 [测试报告](docs/VALIDATION.md)。
 
 ## 设计
 
@@ -91,20 +91,6 @@ port = 5900
 
 Xvfb 与网页桌面不负责解锁密钥环。凭据保存需要可用的 D-Bus 与 GNOME Keyring/兼容 secret service，并验证重启后的解锁方式。首版不自动设置无密码密钥环，也不以 `--password-store=basic` 绕过凭据保护。前台激活只在 X11 + wmctrl 下提供；Wayland 不承诺同样的窗口控制。可配置 `browser.headless=true` 供无人值守流程使用，但须另行验证网站登录与验证码。
 
-## 从 Windows 导入
-
-先制作 Windows 数据库的一致性快照并复制到 Ubuntu。导入仅包含未删除实例的元数据、公开端口、代理和默认网址；创建全新的 Linux 用户目录，不复制 Cookie/密码或旧 PID。Windows 原环境及 Profile 保留回退。
-
-在创建默认三个实例之前，对空目标库导入；导入时需先停止 Web（转发和已有浏览器不应一起重启）：
-
-```bash
-systemctl --user stop chromemanager-web
-bash scripts/cm.sh import-windows /path/to/windows-snapshot.sqlite3
-systemctl --user start chromemanager-web
-```
-
-名称、端口或目录冲突时整批回滚本次导入。随后在页面启动各实例、重新登录，再测试业务调用。不要把 Windows 的 `settings.toml`、`.venv` 或 `cdp-lan-status.json` 复制到 Ubuntu。新增空实例和导入是两种初始化方式，避免先创建相同名称再导入。
-
 ## 调用与网络
 
 - 管理页面：`http://<Ubuntu局域网IP>:8765`
@@ -159,4 +145,4 @@ docker run --rm --init --shm-size=1g -e CHROME_MANAGER_LIVE_TEST=1 -e CM_TEST_NO
 
 `--init` 为容器提供独立的 PID 1，避免 Xvfb 启动握手停滞并回收测试子进程。
 
-容器测试中的 `CM_TEST_NO_SANDBOX` 仅供测试 fixture 使用，生产默认配置保留 sandbox。Windows 上可运行不依赖 Linux 的单元测试；真实浏览器测试只在 Linux 显式开启。
+容器测试中的 `CM_TEST_NO_SANDBOX` 仅供测试 fixture 使用，生产默认配置保留 sandbox。真实浏览器测试只在 Linux 显式开启。
