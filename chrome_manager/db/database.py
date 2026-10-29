@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,8 +24,20 @@ class Database:
             connection = sqlite3.connect(self.path)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA busy_timeout = 5000")
+            # Simultaneous service startup can make journal-mode negotiation
+            # return SQLITE_BUSY immediately, even with SQLite's busy handler.
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    connection.execute("PRAGMA journal_mode = WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    code = getattr(exc, 'sqlite_errorcode', 0) & 0xff
+                    remaining = deadline - time.monotonic()
+                    if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or remaining <= 0:
+                        raise
+                    time.sleep(min(0.05, remaining))
             return connection
         except (sqlite3.Error, OSError) as exc:
             if connection is not None:
